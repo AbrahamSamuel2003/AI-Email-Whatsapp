@@ -6,6 +6,7 @@ import { EmailFactory } from '../email/email.factory.js';
 import { SessionManager } from './session-manager.js';
 import { GmailAuthService } from '../email/gmail-auth.service.js';
 import { GmailAdapter } from '../email/gmail.adapter.js';
+import { decryptToken } from '../crypto/encryption.js';
 
 export interface WhatsAppProcessingResult {
   action: 'DRAFT_GENERATED' | 'EMAIL_SENT' | 'SESSION_RESET' | 'IGNORED' | 'ERROR';
@@ -29,7 +30,7 @@ export class WhatsAppReplyOrchestrator {
       await SessionManager.resetSession(whatsappNumber);
       await whatsappProvider.sendTextMessage(
         whatsappNumber,
-        '🔄 *Session Reset.* Waiting for next incoming important email.'
+        '*[Session Reset]* Waiting for next incoming important email.'
       );
       return { action: 'SESSION_RESET', message: 'Session reset by user command' };
     }
@@ -39,7 +40,7 @@ export class WhatsAppReplyOrchestrator {
       if (!session.activeThreadId || !session.activeMessageId || !session.generatedDraft) {
         await whatsappProvider.sendTextMessage(
           whatsappNumber,
-          '⚠️ No active draft found to send. Please reply to an email notification first.'
+          '[Notice] No active draft found to send. Please reply to an email notification first.'
         );
         return { action: 'ERROR', message: 'No active draft found' };
       }
@@ -111,9 +112,9 @@ export class WhatsAppReplyOrchestrator {
       // Update session state
       await SessionManager.setConfirmedSentState(whatsappNumber);
 
-      // Send WhatsApp confirmation
+      // Send WhatsApp confirmation without emojis
       const confirmationText = [
-        `✅ *Email Sent Successfully!*`,
+        `*[EMAIL SENT SUCCESSFULLY]*`,
         ``,
         `*To:* ${message.senderName || message.senderEmail} (${message.senderEmail})`,
         `*Subject:* ${outboundPayload.subject}`,
@@ -136,7 +137,7 @@ export class WhatsAppReplyOrchestrator {
       if (!session.activeMessageId) {
         await whatsappProvider.sendTextMessage(
           whatsappNumber,
-          'ℹ️ No active email thread selected. You will be notified when an important email arrives.'
+          '[Notice] No active email thread selected. You will be notified when an important email arrives.'
         );
         return { action: 'IGNORED', message: 'No active email message in session' };
       }
@@ -168,16 +169,16 @@ export class WhatsAppReplyOrchestrator {
         clientText
       );
 
-      // Format WhatsApp Preview with safety action prompts
+      // Format WhatsApp Preview without emojis
       const previewText = [
-        `✉️ *Reply Preview Draft*`,
+        `*[REPLY DRAFT PREVIEW]*`,
         `*To:* ${activeMessage.senderName || activeMessage.senderEmail}`,
         `*Subject:* ${aiReply.subject}`,
-        `━━━━━━━━━━━━━━━━━━━`,
+        `----------------------------------------`,
         `${aiReply.replyBody}`,
-        `━━━━━━━━━━━━━━━━━━━`,
-        `👉 Reply *SEND* to dispatch this email.`,
-        `✏️ _Or type a revision to adjust the reply._`,
+        `----------------------------------------`,
+        `Reply *SEND* to dispatch this email.`,
+        `_Or type a revision to adjust the reply._`,
       ].join('\n');
 
       await whatsappProvider.sendInteractiveMessage(whatsappNumber, previewText, [
@@ -195,7 +196,7 @@ export class WhatsAppReplyOrchestrator {
     // Default: IDLE state
     await whatsappProvider.sendTextMessage(
       whatsappNumber,
-      `👋 *Hello!* The AI Email Assistant is active.\nWhen important emails arrive, you will receive an instant summary here and can reply directly in natural language.`
+      `*[AI Email Assistant Active]*\nWhen important emails arrive, you will receive an instant summary here and can reply directly in natural language.`
     );
 
     return {

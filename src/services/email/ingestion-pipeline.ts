@@ -150,7 +150,7 @@ export class EmailIngestionPipeline {
       if (classification.notificationType === 'ALERT_ONLY') {
         // INFO-ONLY ALERT (OTP / Verification Code / Security Notice)
         const lines = [
-          `🔐 *Security / Verification Alert*`,
+          `*[SECURITY ALERT]*`,
           ``,
           `*From:* ${senderDisplay}`,
           `*Subject:* ${email.subject}`,
@@ -165,8 +165,8 @@ export class EmailIngestionPipeline {
           `*Details:*`,
           `${classification.summary || email.cleanBody.trim().slice(0, 300)}`,
           ``,
-          `━━━━━━━━━━━━━━━━━━━`,
-          `ℹ️ _This is an informational alert. No email reply needed._`
+          `----------------------------------------`,
+          `_Informational alert only. No email reply needed._`
         );
 
         await whatsappProvider.sendTextMessage(user.whatsappNumber, lines.join('\n'));
@@ -174,9 +174,8 @@ export class EmailIngestionPipeline {
         // NOTE: Session state stays IDLE — no draft/reply session created!
       } else {
         // ACTIONABLE EMAIL (Requires Reply)
-        const urgencyEmoji = classification.urgency === 'HIGH' ? '🚨' : '📧';
         const notificationText = [
-          `${urgencyEmoji} *Important Email Received*`,
+          `*[IMPORTANT EMAIL]*`,
           ``,
           `*From:* ${senderDisplay}`,
           `*Subject:* ${email.subject}`,
@@ -184,8 +183,8 @@ export class EmailIngestionPipeline {
           `*Message:*`,
           `${email.cleanBody.trim()}`,
           ``,
-          `━━━━━━━━━━━━━━━━━━━`,
-          `💬 _Reply to this message with your response (e.g., "Tomorrow 11 is fine")_`,
+          `----------------------------------------`,
+          `_Reply to this message with your response (e.g., "Tomorrow 11 is fine")_`,
         ].join('\n');
 
         await whatsappProvider.sendTextMessage(user.whatsappNumber, notificationText);

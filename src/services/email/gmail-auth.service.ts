@@ -22,11 +22,6 @@ export class GmailAuthService {
       );
     }
 
-    console.log(`\n[OAuth Debug] Initializing OAuth2Client:`);
-    console.log(`  - Client ID:    ${config.GOOGLE_CLIENT_ID}`);
-    console.log(`  - Redirect URI: ${config.GOOGLE_REDIRECT_URI}`);
-    console.log(`  - From .env:    ${process.env.GOOGLE_REDIRECT_URI}\n`);
-
     return new google.auth.OAuth2(
       config.GOOGLE_CLIENT_ID,
       config.GOOGLE_CLIENT_SECRET,
@@ -40,17 +35,12 @@ export class GmailAuthService {
   static generateAuthUrl(state?: string): string {
     const oauth2Client = this.getOAuth2Client();
 
-    const authUrl = oauth2Client.generateAuthUrl({
+    return oauth2Client.generateAuthUrl({
       access_type: 'offline',
       prompt: 'consent', // Forces refresh token generation
       scope: GMAIL_SCOPES,
       state: state || config.CLIENT_WHATSAPP_NUMBER,
     });
-
-    console.log(`[OAuth Debug] Generated Auth URL:`);
-    console.log(`  - Auth URL: ${authUrl}\n`);
-
-    return authUrl;
   }
 
   /**

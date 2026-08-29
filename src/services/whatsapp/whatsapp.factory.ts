@@ -1,7 +1,6 @@
 import { IWhatsAppProvider } from './whatsapp.interface.js';
 import { WhatsAppCloudAdapter } from './cloud-api.adapter.js';
 import { BaileysAdapter } from './baileys.adapter.js';
-import { TwilioWhatsAppAdapter } from './twilio.adapter.js';
 import { MockWhatsAppAdapter } from './mock.adapter.js';
 import { config } from '../../config/env.js';
 
@@ -18,9 +17,6 @@ export class WhatsAppFactory {
           break;
         case 'cloud_api':
           this.instance = new WhatsAppCloudAdapter();
-          break;
-        case 'twilio':
-          this.instance = new TwilioWhatsAppAdapter();
           break;
         case 'mock':
         default:

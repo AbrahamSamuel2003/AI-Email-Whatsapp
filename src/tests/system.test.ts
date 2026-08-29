@@ -144,7 +144,7 @@ describe('AI Email to WhatsApp Connect - Core Test Suite', () => {
     assert.equal(draftRes.action, 'DRAFT_GENERATED');
 
     const previewMsg = mockWhatsApp.getLastMessage();
-    assert.ok(previewMsg?.body.includes('Reply Preview Draft'));
+    assert.ok(previewMsg?.body.includes('REPLY DRAFT PREVIEW'));
     assert.ok(previewMsg?.body.includes('Tomorrow at 11:00 AM works'));
 
     // Step C: Client confirms with SEND
@@ -234,7 +234,7 @@ describe('AI Email to WhatsApp Connect - Core Test Suite', () => {
 
     // Step B: Verify WhatsApp message has code and indicates no reply needed
     const lastMsg = mockWhatsApp.getLastMessage();
-    assert.ok(lastMsg?.body.includes('Security / Verification Alert'));
+    assert.ok(lastMsg?.body.includes('SECURITY ALERT'));
     assert.ok(lastMsg?.body.includes('*849201*'));
     assert.ok(lastMsg?.body.includes('No email reply needed'));
 
@@ -252,5 +252,63 @@ describe('AI Email to WhatsApp Connect - Core Test Suite', () => {
       timestamp: Date.now(),
     });
     assert.equal(replyAttempt.action, 'IGNORED');
+  });
+
+  test('8. Monitoring & Diagnostics: Probes /health/deep and /api/diagnostics', async () => {
+    const server = await buildServer();
+
+    const deepRes = await server.inject({
+      method: 'GET',
+      url: '/health/deep',
+    });
+    assert.equal(deepRes.statusCode, 200);
+    const deepJson = deepRes.json();
+    assert.ok(deepJson.status === 'HEALTHY' || deepJson.status === 'DEGRADED');
+    assert.ok(deepJson.components.database.status === 'UP');
+    assert.ok(deepJson.components.ai.status === 'ACTIVE');
+
+    const diagRes = await server.inject({
+      method: 'GET',
+      url: '/api/diagnostics',
+    });
+    assert.equal(diagRes.statusCode, 200);
+    const diagJson = diagRes.json();
+    assert.ok(Array.isArray(diagJson.recommendations));
+
+    await server.close();
+  });
+
+  test('9. AdminAlertService: Incident Creation, Cooldown Throttling, and Routing', async () => {
+    const { AdminAlertService } = await import('../services/monitoring/admin-alert.service.js');
+    AdminAlertService.clearHistory();
+
+    // 1. First WhatsApp disconnect alert -> Dispatched
+    const alert1 = await AdminAlertService.notifyWhatsAppDisconnected(
+      config.CLIENT_WHATSAPP_NUMBER,
+      401,
+      'Test disconnect'
+    );
+    assert.equal(alert1.status, 'DISPATCHED');
+    assert.equal(alert1.type, 'WHATSAPP_DISCONNECTED');
+
+    // 2. Immediate duplicate disconnect alert -> Suppressed by cooldown
+    const alert2 = await AdminAlertService.notifyWhatsAppDisconnected(
+      config.CLIENT_WHATSAPP_NUMBER,
+      401,
+      'Duplicate test disconnect'
+    );
+    assert.equal(alert2.status, 'SUPPRESSED_COOLDOWN');
+
+    // 3. Gmail Auth Failure alert -> Dispatched (separate key)
+    const alert3 = await AdminAlertService.notifyGmailAuthFailure(
+      'test@example.com',
+      'invalid_grant token revoked'
+    );
+    assert.equal(alert3.status, 'DISPATCHED');
+    assert.equal(alert3.type, 'GMAIL_AUTH_FAILED');
+
+    // 4. Verify incident history
+    const incidents = AdminAlertService.getRecentIncidents();
+    assert.ok(incidents.length >= 3);
   });
 });

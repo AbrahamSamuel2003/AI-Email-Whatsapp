@@ -9,6 +9,7 @@
     "start": "node --import tsx src/index.ts",
     "dev": "node --import tsx --watch src/index.ts",
     "qr": "node --import tsx src/simulator/start-whatsapp-qr.ts",
+    "audit": "node --import tsx src/simulator/run-audit.ts",
     "simulate": "node --import tsx src/simulator/interactive-cli.ts",
     "simulate:auto": "node --import tsx src/simulator/run-scenario.ts",
     "gmail:test": "node --import tsx src/simulator/gmail-test.ts",

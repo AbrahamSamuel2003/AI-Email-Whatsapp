@@ -16,13 +16,27 @@ export async function buildServer(): Promise<FastifyInstance> {
   await server.register(cors);
   await server.register(sensible);
 
-  // Health Check
+  // Liveness Check
   server.get('/health', async () => {
     return {
       status: 'ok',
       service: 'ai-email-whatsapp-connect',
       timestamp: new Date().toISOString(),
     };
+  });
+
+  // Deep Dependency Health Check (Database, WhatsApp, Gmail, Memory)
+  server.get('/health/deep', async (_req, reply) => {
+    const { LogAuditorAgent } = await import('../services/monitoring/log-auditor.agent.js');
+    const audit = await LogAuditorAgent.auditSystemHealth();
+    const statusCode = audit.status === 'CRITICAL' ? 503 : 200;
+    return reply.code(statusCode).send(audit);
+  });
+
+  // Diagnostics & Incident Audit API
+  server.get('/api/diagnostics', async () => {
+    const { LogAuditorAgent } = await import('../services/monitoring/log-auditor.agent.js');
+    return LogAuditorAgent.auditSystemHealth();
   });
 
   // System Status & Connected Accounts

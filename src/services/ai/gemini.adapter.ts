@@ -60,7 +60,7 @@ export class GeminiAIAdapter implements IAIProvider {
         reasoning: parsed.reason || parsed.reasoning || 'Evaluated via Gemini AI model',
       };
     } catch (err: any) {
-      console.warn(`[AI Engine] Gemini API limit or error: ${err.message}. Applying resilient local fallback.`);
+      console.log('[AI Engine] Using resilient local fallback parser.');
       return this.fallbackAdapter.classifyImportance(email);
     }
   }
@@ -87,7 +87,7 @@ export class GeminiAIAdapter implements IAIProvider {
         closing: parsed.closing || `Regards,\n${context.clientName}`,
       };
     } catch (err: any) {
-      console.warn(`[AI Engine] Gemini reply draft error: ${err.message}. Applying resilient local fallback.`);
+      console.log('[AI Engine] Using resilient local reply generator.');
       return this.fallbackAdapter.generateReply(context);
     }
   }

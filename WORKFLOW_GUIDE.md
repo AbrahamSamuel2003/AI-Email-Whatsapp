@@ -30,26 +30,59 @@ A production-grade, provider-agnostic system that bridges **Gmail**, **Google Ge
                         │ (IDLE ➔ NOTIFIED ➔ DRAFTED ➔ SENT)      │
                         └────────────────────┬────────────────────┘
                                              │
-                         IWhatsAppProvider Adapter Layer
-         ┌─────────────────────────┬─────────┴───────────────┬─────────────────────────┐
-         │                         │                         │                         │
-   BaileysAdapter           MetaCloudAdapter           TwilioAdapter              MockAdapter
-(WhatsApp Web QR Scan)   (Meta Business API)        (Twilio Sandbox)         (Unit Tests & CLI)
+                          IWhatsAppProvider Adapter Layer
+         ┌─────────────────────────────┼─────────────────────────────┐
+         │                             │                             │
+   BaileysAdapter               MetaCloudAdapter                MockAdapter
+(WhatsApp Web QR Scan)        (Meta Business API)           (Unit Tests & CLI)
 ```
 
 ---
 
-## 🔄 2. End-to-End Workflow Stages
+## 🛡️ 2. Enterprise Failure Detection & Monitoring Architecture
+
+```text
+┌────────────────────────────────────────────────────────────────────────┐
+│ Layer 1: PM2 Process Resurrection (ecosystem.config.cjs)               │
+│ • Automatically restarts Node.js in < 500ms if process crashes.        │
+│ • Handles memory limits (350M restart guard) and auto-boot on reboot.  │
+└───────────────────────────────────┬────────────────────────────────────┘
+                                    │
+                                    ▼
+┌────────────────────────────────────────────────────────────────────────┐
+│ Layer 2: Deep Health Probe (GET /health/deep & GET /api/diagnostics)   │
+│ • Probes Database, WhatsApp Socket, Gmail Accounts, and AI Engine.    │
+└───────────────────────────────────┬────────────────────────────────────┘
+                                    │
+                                    ▼
+┌────────────────────────────────────────────────────────────────────────┐
+│ Layer 3: AdminAlertService (Multi-Channel Incident Dispatcher)         │
+│ • Scenario A (WhatsApp Unlinked): Fallback Email + Admin Report.       │
+│ • Scenario B (Gmail Token Revoked): WhatsApp Notice + Admin Report.    │
+│ • Scenario C (Process Crash): Independent Watchdog Outage Alert.       │
+│ • Anti-Spam Throttling: 1-hour cooldown per incident key.              │
+└───────────────────────────────────┬────────────────────────────────────┘
+                                    │
+                                    ▼
+┌────────────────────────────────────────────────────────────────────────┐
+│ Layer 4: Autonomous Log Auditor Agent & CLI (npm run audit)            │
+│ • Instant terminal diagnosis of system health, metrics, and incidents. │
+└────────────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## 🔄 3. End-to-End Workflow Stages
 
 ### 📬 Stage 1: Email Ingestion & Deduplication
 1. **Detection:** The `GmailPollerService` checks your connected mailbox every 10 seconds (or receives Google Cloud Pub/Sub push webhooks).
-2. **Delta Processing:** Retrieves only new, unread emails using RFC-compliant message IDs.
+2. **Delta Processing:** Retrieves only new, unread emails using RFC-compliant message IDs with sequential batch throttling (300ms pause) to prevent AI concurrency bursts.
 3. **Database Guard:** Checks `prisma.emailMessage.findUnique({ where: { threadId_externalMessageId } })`. If an email was already ingested, it is **never re-notified**.
 
 ---
 
 ### 🧠 Stage 2: AI Classification & Security Gating
-Every incoming email is evaluated by **Google Gemini (`gemini-3.6-flash`)** with resilient local heuristics fallback:
+Every incoming email is evaluated by **Google Gemini (`gemini-1.5-flash`)** with resilient local heuristics fallback:
 
 | Email Category | AI Classification | System Action | WhatsApp Behavior |
 | :--- | :--- | :--- | :--- |
@@ -59,13 +92,13 @@ Every incoming email is evaluated by **Google Gemini (`gemini-3.6-flash`)** with
 
 ---
 
-### 📱 Stage 3: WhatsApp Notification Delivery
-1. The `BaileysAdapter` (or `MetaCloudAdapter`) dispatches a formatted message to your personal WhatsApp number (`CLIENT_WHATSAPP_NUMBER`).
+### 📱 Stage 3: WhatsApp Notification Delivery (Clean Corporate Typography)
+1. The `BaileysAdapter` (or `MetaCloudAdapter`) dispatches a formatted message without emojis to your personal WhatsApp number (`CLIENT_WHATSAPP_NUMBER`).
 2. **Anti-Loop Signature Protection:** The adapter records outgoing message IDs and signatures to prevent self-chat reflection loops.
 
 **Example Notification on WhatsApp:**
 ```text
-📧 Important Email Received
+*[IMPORTANT EMAIL]*
 
 From: Internal Test (internallabexam001@gmail.com)
 Subject: Project Deliverable Sync & Review
@@ -73,8 +106,8 @@ Subject: Project Deliverable Sync & Review
 Message:
 Hi Abraham, can we meet tomorrow at 11 AM to review the final project deliverable?
 
-━━━━━━━━━━━━━━━━━━━
-💬 Reply to this message with your response (e.g., "Tomorrow 11 is fine")
+----------------------------------------
+Reply to this message with your response (e.g., "Tomorrow 11 is fine")
 ```
 
 ---
@@ -89,19 +122,19 @@ Hi Abraham, can we meet tomorrow at 11 AM to review the final project deliverabl
 4. Session transitions to `AWAITING_CONFIRMATION` and sends you the preview on WhatsApp:
 
 ```text
-✉️ Reply Preview Draft
+*[REPLY DRAFT PREVIEW]*
 To: Internal Test
 Subject: Re: Project Deliverable Sync & Review
-━━━━━━━━━━━━━━━━━━━
+----------------------------------------
 Hi Internal Test,
 
 Tomorrow at 11:00 AM works perfectly for me. We can connect and review the deliverable then.
 
 Regards,
 Abraham Samuel
-━━━━━━━━━━━━━━━━━━━
-👉 Reply SEND to dispatch this email.
-✏️ Or type a revision to adjust the reply.
+----------------------------------------
+Reply SEND to dispatch this email.
+Or type a revision to adjust the reply.
 ```
 
 ---
@@ -114,8 +147,12 @@ Abraham Samuel
    - Dispatches the email via Google Gmail API (`users.messages.send`) directly inside the original conversation thread.
 3. WhatsApp confirms delivery:
    ```text
-   ✅ Email Sent Successfully!
-   Delivered inside the original Gmail conversation thread.
+   *[EMAIL SENT SUCCESSFULLY]*
+   To: Internal Test (internallabexam001@gmail.com)
+   Subject: Re: Project Deliverable Sync & Review
+   Thread ID: 1a04cca597f32e5a
+   
+   Your reply was delivered inside the original email conversation.
    ```
 4. Session resets to `IDLE`.
 
@@ -127,9 +164,23 @@ When login verification emails arrive (e.g. GitHub, Devin, Google):
 2. The alert is delivered with the code formatted in bold.
 3. The session state **remains `IDLE`**. If you text back, the system safely ignores the text, preventing accidental emails from being sent to automated security senders.
 
+```text
+*[SECURITY ALERT]*
+
+From: Devin (no-reply@devin.ai)
+Subject: Your Devin Login Code
+Code: *849201*
+
+Details:
+To start using Devin, please enter the verification code: 849201.
+
+----------------------------------------
+Informational alert only. No email reply needed.
+```
+
 ---
 
-## 🔑 3. Permanent WhatsApp Session Architecture
+## 🔑 4. Permanent WhatsApp Session Architecture
 
 * **Zero Re-Scanning:** When you scan the QR code once with your phone, WhatsApp generates cryptographic tokens stored in `./baileys_auth/`.
 * **Automatic Reconnect:** Whenever the server starts up (`npm run qr` or `npm start`), it auto-restores the existing session in 2 seconds.
@@ -137,26 +188,31 @@ When login verification emails arrive (e.g. GitHub, Devin, Google):
 
 ---
 
-## ⚙️ 4. Configuration Reference (`.env`)
+## ⚙️ 5. Configuration Reference (`.env`)
 
 | Variable | Description | Example |
 | :--- | :--- | :--- |
-| `WHATSAPP_PROVIDER` | Adapter selection (`baileys`, `cloud_api`, `twilio`, `mock`) | `baileys` |
+| `WHATSAPP_PROVIDER` | Adapter selection (`baileys`, `cloud_api`, `mock`) | `baileys` |
 | `CLIENT_WHATSAPP_NUMBER` | Your personal WhatsApp phone number | `+916383813648` |
 | `AI_PROVIDER` | AI classification engine (`gemini`, `mock`) | `gemini` |
-| `AI_MODEL_NAME` | Gemini model name | `gemini-3.6-flash` |
+| `AI_MODEL_NAME` | Gemini model name | `gemini-1.5-flash` |
 | `EMAIL_PROVIDER` | Mailbox provider (`gmail`, `mock`) | `gmail` |
 | `AUTO_SYNC_ENABLED` | Automated background polling toggle | `true` |
 | `AUTO_SYNC_INTERVAL_SECONDS` | Polling frequency in seconds | `10` |
+| `ADMIN_SUPPORT_EMAIL` | Admin incident report destination | `support@ss40network.com` |
+| `ADMIN_ALERT_ENABLED` | Toggle incident alerting emails | `true` |
+| `SS40_PORTAL_URL` | Client re-authorization portal URL | `https://connect.ss40network.com` |
+| `ALERT_COOLDOWN_MINUTES` | Cooldown to prevent alert spam | `60` |
 
 ---
 
-## 🧪 5. Testing & Diagnostics Commands
+## 🧪 6. Operational & Diagnostic Commands
 
 | Command | Purpose |
 | :--- | :--- |
 | `npm run qr` | Starts the live background server with WhatsApp QR Web bridge. |
-| `npm test` | Runs the automated 7-suite unit and integration test suite. |
+| `npm run audit` | Runs instant CLI diagnostic health audit of DB, WhatsApp, Gmail, AI, and metrics. |
+| `npm test` | Runs the automated 9-suite unit and integration test suite. |
 | `npm run test:ai` | Tests Gemini importance and security classification against real mailbox data. |
 | `npm run test:whatsapp` | Verifies Meta Cloud webhook parsing and state machine dispatch. |
 | `npm run simulate` | Interactive CLI console for offline testing. |

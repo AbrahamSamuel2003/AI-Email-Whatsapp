@@ -13,10 +13,10 @@ const envSchema = z.object({
   // AI
   AI_PROVIDER: z.enum(['mock', 'gemini']).default('mock'),
   GEMINI_API_KEY: z.string().optional(),
-  AI_MODEL_NAME: z.string().default('gemini-2.5-flash'),
+  AI_MODEL_NAME: z.string().default('gemini-1.5-flash'),
 
   // WhatsApp
-  WHATSAPP_PROVIDER: z.enum(['mock', 'cloud_api', 'baileys', 'twilio']).default('mock'),
+  WHATSAPP_PROVIDER: z.enum(['mock', 'cloud_api', 'baileys']).default('mock'),
   WHATSAPP_PHONE_NUMBER_ID: z.string().optional(),
   WHATSAPP_ACCESS_TOKEN: z.string().optional(),
   WHATSAPP_VERIFY_TOKEN: z.string().default('whatsapp_secret_verify_token_123'),
@@ -29,6 +29,12 @@ const envSchema = z.object({
   GOOGLE_REDIRECT_URI: z.string().default('http://localhost:3000/auth/google/callback'),
   AUTO_SYNC_ENABLED: z.string().transform((v) => v === 'true').default('true'),
   AUTO_SYNC_INTERVAL_SECONDS: z.coerce.number().default(10),
+
+  // Monitoring & Admin Alerting
+  ADMIN_SUPPORT_EMAIL: z.string().default('support@ss40network.com'),
+  ADMIN_ALERT_ENABLED: z.string().transform((v) => v === 'true').default('true'),
+  SS40_PORTAL_URL: z.string().default('https://connect.ss40network.com'),
+  ALERT_COOLDOWN_MINUTES: z.coerce.number().default(60),
 
   // Redis / Queue
   REDIS_HOST: z.string().default('127.0.0.1'),

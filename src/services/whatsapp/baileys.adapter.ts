@@ -27,14 +27,20 @@ export class BaileysAdapter implements IWhatsAppProvider {
   private isBotOutput(text: string): boolean {
     const trimmed = text.trim();
     return (
-      trimmed.startsWith('📧 *Important Email') ||
-      trimmed.startsWith('🔐 *Security') ||
-      trimmed.startsWith('✉️ *Reply Preview') ||
-      trimmed.startsWith('✅ *Email Sent') ||
-      trimmed.startsWith('👋 Hello!') ||
-      trimmed.startsWith('🤖 WhatsApp') ||
-      trimmed.startsWith('👉 Reply *SEND*') ||
-      trimmed.startsWith('ℹ️ This is an informational alert')
+      trimmed.startsWith('*[IMPORTANT EMAIL]*') ||
+      trimmed.startsWith('*[SECURITY ALERT]*') ||
+      trimmed.startsWith('*[REPLY DRAFT PREVIEW]*') ||
+      trimmed.startsWith('*[EMAIL SENT SUCCESSFULLY]*') ||
+      trimmed.startsWith('*[AI Email Assistant Active]*') ||
+      trimmed.startsWith('*[Session Reset]*') ||
+      trimmed.startsWith('Reply *SEND* to dispatch') ||
+      trimmed.startsWith('Informational alert only') ||
+      trimmed.startsWith('[Notice]') ||
+      trimmed.startsWith('📧') ||
+      trimmed.startsWith('🔐') ||
+      trimmed.startsWith('✉️') ||
+      trimmed.startsWith('✅') ||
+      trimmed.startsWith('👋')
     );
   }
 
@@ -72,6 +78,16 @@ export class BaileysAdapter implements IWhatsAppProvider {
                 fs.rmSync(this.authDir, { recursive: true, force: true });
               }
             } catch {}
+
+            // Trigger automated incident report to support@ss40network.com and client fallback email
+            import('../monitoring/admin-alert.service.js').then(({ AdminAlertService }) => {
+              AdminAlertService.notifyWhatsAppDisconnected(
+                config.CLIENT_WHATSAPP_NUMBER,
+                statusCode,
+                'WhatsApp session was unlinked from phone or inactive > 14 days'
+              );
+            }).catch(() => {});
+
             setTimeout(() => this.initialize(), 1500);
           } else {
             console.log(`[WhatsApp Baileys] Reconnecting connection (code: ${statusCode || 'temp'})...`);
@@ -181,7 +197,7 @@ export class BaileysAdapter implements IWhatsAppProvider {
     body: string,
     buttons: Array<{ id: string; title: string }>
   ): Promise<WhatsAppSendResult> {
-    const buttonPrompt = buttons.map((b) => `👉 Reply *${b.title}*`).join('\n');
+    const buttonPrompt = buttons.map((b) => `Reply *${b.title}*`).join('\n');
     const fullText = `${body}\n\n${buttonPrompt}`;
     return this.sendTextMessage(to, fullText);
   }

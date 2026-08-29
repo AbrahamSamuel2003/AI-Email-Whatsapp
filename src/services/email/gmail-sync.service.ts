@@ -21,9 +21,18 @@ export class GmailSyncService {
       throw new Error(`EmailAccount ${emailAccountId} not found`);
     }
 
-    const authClient = await GmailAuthService.getAuthenticatedClientForAccount(account.id);
-    const gmailAdapter = new GmailAdapter(authClient);
+    let authClient;
+    try {
+      authClient = await GmailAuthService.getAuthenticatedClientForAccount(account.id);
+    } catch (err: any) {
+      if (err.message?.includes('invalid_grant') || err.message?.includes('token')) {
+        const { AdminAlertService } = await import('../monitoring/admin-alert.service.js');
+        await AdminAlertService.notifyGmailAuthFailure(account.emailAddress, err.message);
+      }
+      throw err;
+    }
 
+    const gmailAdapter = new GmailAdapter(authClient);
     const messageIds = await gmailAdapter.listRecentMessages('label:INBOX', maxEmails);
     const processedIds: string[] = [];
 
@@ -32,6 +41,8 @@ export class GmailSyncService {
         const metadata = await gmailAdapter.fetchMessage(msgId);
         await TaskQueueManager.enqueueEmail(metadata);
         processedIds.push(msgId);
+        // Sequential throttle to prevent AI concurrency bursts
+        await new Promise((r) => setTimeout(r, 300));
       } catch (err: any) {
         console.error(`Failed to ingest Gmail message ${msgId}:`, err.message);
       }
