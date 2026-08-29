@@ -1,0 +1,56 @@
+{
+  "name": "ai-email-whatsapp-connect",
+  "version": "1.0.0",
+  "description": "AI Email to WhatsApp Reply System with thread preservation and preview safety",
+  "main": "dist/index.js",
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "start": "node --import tsx src/index.ts",
+    "dev": "node --import tsx --watch src/index.ts",
+    "qr": "node --import tsx src/simulator/start-whatsapp-qr.ts",
+    "simulate": "node --import tsx src/simulator/interactive-cli.ts",
+    "simulate:auto": "node --import tsx src/simulator/run-scenario.ts",
+    "gmail:test": "node --import tsx src/simulator/gmail-test.ts",
+    "test:ai": "node --import tsx src/simulator/test-ai-classifier.ts",
+    "test:whatsapp": "node --import tsx src/simulator/test-whatsapp-cloud.ts",
+    "verify:sync": "node --import tsx src/simulator/verify-sync.ts",
+    "test": "node --import tsx --test src/tests/system.test.ts",
+    "prisma:generate": "prisma generate",
+    "prisma:push": "prisma db push"
+  },
+  "keywords": [
+    "email",
+    "whatsapp",
+    "ai",
+    "gemini",
+    "fastify",
+    "bullmq"
+  ],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@fastify/cors": "^10.0.2",
+    "@fastify/sensible": "^6.0.3",
+    "@google/generative-ai": "^0.24.0",
+    "@prisma/client": "^6.4.1",
+    "@whiskeysockets/baileys": "^7.0.0-rc14",
+    "bullmq": "^5.41.6",
+    "dotenv": "^16.4.7",
+    "fastify": "^5.2.1",
+    "googleapis": "^146.0.0",
+    "ioredis": "^5.6.0",
+    "pino": "^10.3.1",
+    "qrcode-terminal": "^0.12.0",
+    "uuid": "^11.1.0",
+    "zod": "^3.24.2"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.9",
+    "@types/qrcode-terminal": "^0.12.2",
+    "@types/uuid": "^10.0.0",
+    "prisma": "^6.4.1",
+    "tsx": "^4.19.3",
+    "typescript": "^5.7.3"
+  }
+}

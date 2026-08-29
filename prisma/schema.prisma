@@ -1,0 +1,109 @@
+// Prisma schema for AI Email to WhatsApp Reply System
+
+datasource db {
+  provider = "sqlite" // Set to "postgresql" in production
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+model User {
+  id              String            @id @default(uuid())
+  name            String
+  email           String            @unique
+  whatsappNumber  String            @unique
+  createdAt       DateTime          @default(now())
+  updatedAt       DateTime          @updatedAt
+  emailAccounts   EmailAccount[]
+  whatsappSession WhatsappSession?
+}
+
+model EmailAccount {
+  id                    String          @id @default(uuid())
+  userId                String
+  provider              String          // "GMAIL" | "OUTLOOK" | "MOCK"
+  emailAddress          String
+  encryptedAccessToken  String?
+  encryptedRefreshToken String?
+  tokenExpiry           DateTime?
+  syncCursor            String?
+  createdAt             DateTime        @default(now())
+  updatedAt             DateTime        @updatedAt
+  user                  User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  threads               EmailThread[]
+  outbounds             OutboundEmail[]
+
+  @@unique([userId, emailAddress])
+}
+
+model EmailThread {
+  id                String          @id @default(uuid())
+  emailAccountId    String
+  externalThreadId  String          // Thread ID from Gmail / Outlook / Mock
+  subject           String
+  lastMessageAt     DateTime        @default(now())
+  createdAt         DateTime        @default(now())
+  updatedAt         DateTime        @updatedAt
+  emailAccount      EmailAccount    @relation(fields: [emailAccountId], references: [id], onDelete: Cascade)
+  messages          EmailMessage[]
+  outboundReplies   OutboundEmail[]
+
+  @@unique([emailAccountId, externalThreadId])
+}
+
+model EmailMessage {
+  id                String          @id @default(uuid())
+  threadId          String
+  externalMessageId String          // Message ID from Provider
+  rfcMessageId      String?         // RFC 2822 <id@mail.example.com>
+  inReplyTo         String?         // RFC 2822 In-Reply-To header
+  references        String?         // RFC 2822 References chain
+  senderName        String?
+  senderEmail       String
+  recipientEmail    String
+  subject           String
+  cleanBody         String
+  rawSnippet        String?
+  receivedAt        DateTime        @default(now())
+  isImportant       Boolean         @default(false)
+  importanceScore   Float?          @default(0)
+  importanceReason  String?
+  urgency           String?         @default("LOW") // "LOW" | "MEDIUM" | "HIGH"
+  actionRequired    String?
+  createdAt         DateTime        @default(now())
+  thread            EmailThread     @relation(fields: [threadId], references: [id], onDelete: Cascade)
+
+  @@unique([threadId, externalMessageId])
+}
+
+model WhatsappSession {
+  id              String            @id @default(uuid())
+  userId          String            @unique
+  whatsappNumber  String            @unique
+  state           String            @default("IDLE") // "IDLE" | "NOTIFIED" | "PREVIEW_GENERATED" | "CONFIRMED_SENT"
+  activeThreadId  String?
+  activeMessageId String?
+  generatedDraft  String?
+  lastClientText  String?
+  updatedAt       DateTime          @updatedAt
+  createdAt       DateTime          @default(now())
+  user            User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model OutboundEmail {
+  id                  String        @id @default(uuid())
+  emailAccountId      String
+  threadId            String
+  inReplyToMessageId  String?
+  toEmail             String
+  subject             String
+  body                String
+  status              String        @default("PENDING") // "PENDING" | "SENT" | "FAILED"
+  externalSentId      String?
+  sentAt              DateTime?
+  createdAt           DateTime      @default(now())
+  emailAccount        EmailAccount  @relation(fields: [emailAccountId], references: [id], onDelete: Cascade)
+  thread              EmailThread   @relation(fields: [threadId], references: [id], onDelete: Cascade)
+}
