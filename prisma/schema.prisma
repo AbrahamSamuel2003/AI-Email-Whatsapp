@@ -10,14 +10,15 @@ generator client {
 }
 
 model User {
-  id              String            @id @default(uuid())
-  name            String
-  email           String            @unique
-  whatsappNumber  String            @unique
-  createdAt       DateTime          @default(now())
-  updatedAt       DateTime          @updatedAt
-  emailAccounts   EmailAccount[]
-  whatsappSession WhatsappSession?
+  id                String            @id @default(uuid())
+  name              String
+  email             String            @unique
+  whatsappNumber    String            @unique
+  preferredLanguage String            @default("ENGLISH") // "ENGLISH" | "TAMIL" | "HINDI"
+  createdAt         DateTime          @default(now())
+  updatedAt         DateTime          @updatedAt
+  emailAccounts     EmailAccount[]
+  whatsappSession   WhatsappSession?
 }
 
 model EmailAccount {

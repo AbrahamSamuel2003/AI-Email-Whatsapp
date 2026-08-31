@@ -41,7 +41,10 @@ export class GmailPollerService {
       const gmailAccounts = await prisma.emailAccount.findMany({
         where: {
           provider: 'GMAIL',
-          NOT: { encryptedAccessToken: null },
+          NOT: [
+            { encryptedAccessToken: null },
+            { emailAddress: { startsWith: 'oauth-test-' } },
+          ],
         },
       });
 

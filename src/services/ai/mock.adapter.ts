@@ -2,7 +2,7 @@ import { IAIProvider } from './ai.interface.js';
 import { AIImportanceResult, AIReplyContext, AIReplyResult, EmailMetadata, NotificationType } from '../../core/types.js';
 
 export class MockAIAdapter implements IAIProvider {
-  async classifyImportance(email: EmailMetadata): Promise<AIImportanceResult> {
+  async classifyImportance(email: EmailMetadata, _preferredLanguage?: string): Promise<AIImportanceResult> {
     const text = `${email.subject} ${email.cleanBody} ${email.senderEmail} ${email.senderName || ''}`.toLowerCase();
 
     // 1. Detect OTP, Verification Codes, 2FA, Password Resets & Security Alerts (ALERT_ONLY)

@@ -1,5 +1,5 @@
 import { Queue, Worker, Job } from 'bullmq';
-import IORedis from 'ioredis';
+import { Redis } from 'ioredis';
 import { EmailMetadata, WhatsAppInboundMessage } from '../core/types.js';
 import { EmailIngestionPipeline } from '../services/email/ingestion-pipeline.js';
 import { WhatsAppReplyOrchestrator } from '../services/state/reply-orchestrator.js';
@@ -29,7 +29,7 @@ export class TaskQueueManager {
     }
 
     try {
-      const redisConnection = new IORedis({
+      const redisConnection = new (Redis as any)({
         host: config.REDIS_HOST,
         port: config.REDIS_PORT,
         password: config.REDIS_PASSWORD || undefined,
@@ -37,7 +37,7 @@ export class TaskQueueManager {
         connectTimeout: 2000,
       });
 
-      redisConnection.on('error', (err) => {
+      redisConnection.on('error', (err: any) => {
         console.warn('⚠️ Redis connection error, falling back to direct processing:', err.message);
         this.isRedisAvailable = false;
       });

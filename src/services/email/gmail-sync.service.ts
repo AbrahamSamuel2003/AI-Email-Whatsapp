@@ -38,11 +38,21 @@ export class GmailSyncService {
 
     for (const msgId of messageIds) {
       try {
+        // Fast DB Pre-check: Skip already ingested emails completely (zero network & zero AI usage)
+        const alreadyIngested = await prisma.emailMessage.findFirst({
+          where: { externalMessageId: msgId },
+          select: { id: true },
+        });
+
+        if (alreadyIngested) {
+          continue;
+        }
+
         const metadata = await gmailAdapter.fetchMessage(msgId);
         await TaskQueueManager.enqueueEmail(metadata);
         processedIds.push(msgId);
         // Sequential throttle to prevent AI concurrency bursts
-        await new Promise((r) => setTimeout(r, 300));
+        await new Promise((r) => setTimeout(r, 600));
       } catch (err: any) {
         console.error(`Failed to ingest Gmail message ${msgId}:`, err.message);
       }

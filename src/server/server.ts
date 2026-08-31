@@ -253,6 +253,108 @@ export async function buildServer(): Promise<FastifyInstance> {
   });
 
   // -------------------------------------------------------------
+  // Multi-User WhatsApp QR & Session Management
+  // -------------------------------------------------------------
+  server.get('/whatsapp/qr', async (request, reply) => {
+    const query = request.query as any;
+    const phone = query.phone || config.CLIENT_WHATSAPP_NUMBER;
+    const provider = WhatsAppFactory.getProvider() as any;
+
+    if (typeof provider.getLatestQrForNumber !== 'function') {
+      return reply.code(400).send({ error: 'QR login is only available when WHATSAPP_PROVIDER=baileys' });
+    }
+
+    // Initialize session if not existing
+    if (typeof provider.initSessionForNumber === 'function') {
+      await provider.initSessionForNumber(phone, false);
+    }
+
+    const qrString = provider.getLatestQrForNumber(phone);
+
+    if (!qrString) {
+      return reply.type('text/html').send(`
+        <!DOCTYPE html>
+        <html>
+        <head><title>WhatsApp Connected</title><style>body{font-family:sans-serif;background:#0f172a;color:#fff;display:flex;align-items:center;justify-content:center;height:100vh;} .card{background:#1e293b;padding:2rem;border-radius:12px;text-align:center;}</style></head>
+        <body><div class="card"><h2>✅ WhatsApp Connected</h2><p>Session for <strong>${phone}</strong> is active and connected!</p></div></body></html>
+      `);
+    }
+
+    // Render HTML page with live QR generator script
+    const html = `
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <title>Scan WhatsApp QR - ${phone}</title>
+        <meta http-equiv="refresh" content="5">
+        <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+        <style>
+          body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; background: #0f172a; color: #f8fafc; display: flex; align-items: center; justify-content: center; min-height: 100vh; margin: 0; }
+          .card { background: #1e293b; padding: 2.5rem; border-radius: 16px; text-align: center; box-shadow: 0 20px 40px rgba(0,0,0,0.5); max-width: 420px; border: 1px solid #334155; }
+          #qrcode { background: #fff; padding: 16px; border-radius: 12px; display: inline-block; margin: 1.5rem 0; }
+          h2 { margin: 0 0 8px; font-size: 1.4rem; color: #38bdf8; }
+          p { color: #94a3b8; font-size: 0.9rem; margin: 0.5rem 0; }
+          .badge { background: #10b981; color: #fff; padding: 4px 10px; border-radius: 12px; font-size: 0.8rem; font-weight: bold; }
+        </style>
+      </head>
+      <body>
+        <div class="card">
+          <span class="badge">Multi-User Session</span>
+          <h2>Link WhatsApp</h2>
+          <p>Scan with WhatsApp on: <strong>${phone}</strong></p>
+          <div id="qrcode"></div>
+          <p>Open WhatsApp ➔ Linked Devices ➔ Link a Device</p>
+          <p style="font-size:0.75rem;color:#64748b;">Auto-refreshing every 5 seconds...</p>
+        </div>
+        <script>
+          new QRCode(document.getElementById("qrcode"), {
+            text: ${JSON.stringify(qrString)},
+            width: 256,
+            height: 256
+          });
+        </script>
+      </body>
+      </html>
+    `;
+
+    return reply.type('text/html').send(html);
+  });
+
+  // Enable Pub/Sub watch for all connected Gmail accounts
+  server.post('/gmail/watch/all', async (request, reply) => {
+    const body = (request.body as any) || {};
+    const topicName = body.topicName || config.GMAIL_PUBSUB_TOPIC;
+
+    if (!topicName) {
+      return reply.code(400).send({
+        error: 'Missing topicName',
+        hint: 'Provide "topicName" in request body or set GMAIL_PUBSUB_TOPIC in .env',
+      });
+    }
+
+    const accounts = await prisma.emailAccount.findMany({
+      where: { provider: 'GMAIL' },
+    });
+
+    const results = [];
+    for (const account of accounts) {
+      try {
+        const res = await GmailSyncService.enableMailboxWatch(account.id, topicName);
+        results.push({ emailAddress: account.emailAddress, status: 'watching', ...res });
+      } catch (err: any) {
+        results.push({ emailAddress: account.emailAddress, status: 'failed', error: err.message });
+      }
+    }
+
+    return reply.code(200).send({
+      status: 'watch_batch_completed',
+      topicName,
+      totalAccounts: accounts.length,
+      results,
+    });
+  });
+
+  // -------------------------------------------------------------
   // WhatsApp Webhooks & Simulation
   // -------------------------------------------------------------
 

@@ -109,6 +109,8 @@ export class SessionManager {
       where: { id: session.id },
       data: {
         state: 'CONFIRMED_SENT',
+        activeThreadId: null,
+        activeMessageId: null,
         generatedDraft: null,
       },
     });

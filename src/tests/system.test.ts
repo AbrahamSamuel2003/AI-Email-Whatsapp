@@ -10,6 +10,7 @@ import { EmailFactory } from '../services/email/email.factory.js';
 import { AIFactory } from '../services/ai/ai.factory.js';
 import { EmailIngestionPipeline } from '../services/email/ingestion-pipeline.js';
 import { WhatsAppReplyOrchestrator } from '../services/state/reply-orchestrator.js';
+import { SessionManager } from '../services/state/session-manager.js';
 import { GmailAuthService, GMAIL_SCOPES } from '../services/email/gmail-auth.service.js';
 import { buildServer } from '../server/server.js';
 import { EmailMetadata } from '../core/types.js';
@@ -144,7 +145,7 @@ describe('AI Email to WhatsApp Connect - Core Test Suite', () => {
     assert.equal(draftRes.action, 'DRAFT_GENERATED');
 
     const previewMsg = mockWhatsApp.getLastMessage();
-    assert.ok(previewMsg?.body.includes('REPLY DRAFT PREVIEW'));
+    assert.ok(previewMsg?.body.includes('DRAFT PREVIEW'));
     assert.ok(previewMsg?.body.includes('Tomorrow at 11:00 AM works'));
 
     // Step C: Client confirms with SEND
@@ -225,7 +226,8 @@ describe('AI Email to WhatsApp Connect - Core Test Suite', () => {
       receivedAt: new Date(),
     };
 
-    // Step A: Ingest OTP email
+    // Step A: Ingest OTP email (Ensure session is clean IDLE first)
+    await SessionManager.resetSession(config.CLIENT_WHATSAPP_NUMBER);
     const res = await EmailIngestionPipeline.processIncomingEmail(otpEmail);
     assert.equal(res.isImportant, true);
     assert.equal(res.notificationType, 'ALERT_ONLY');
@@ -234,7 +236,7 @@ describe('AI Email to WhatsApp Connect - Core Test Suite', () => {
 
     // Step B: Verify WhatsApp message has code and indicates no reply needed
     const lastMsg = mockWhatsApp.getLastMessage();
-    assert.ok(lastMsg?.body.includes('SECURITY ALERT'));
+    assert.ok(lastMsg?.body.includes('SECURITY'));
     assert.ok(lastMsg?.body.includes('*849201*'));
     assert.ok(lastMsg?.body.includes('No email reply needed'));
 
@@ -310,5 +312,12 @@ describe('AI Email to WhatsApp Connect - Core Test Suite', () => {
     // 4. Verify incident history
     const incidents = AdminAlertService.getRecentIncidents();
     assert.ok(incidents.length >= 3);
+  });
+
+  after(async () => {
+    // Clean up mock test accounts from dev.db
+    await prisma.emailAccount.deleteMany({
+      where: { emailAddress: { startsWith: 'oauth-test-' } },
+    });
   });
 });

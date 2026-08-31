@@ -11,9 +11,11 @@ const envSchema = z.object({
   ENCRYPTION_KEY: z.string().min(32).default('0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef'),
   
   // AI
-  AI_PROVIDER: z.enum(['mock', 'gemini']).default('mock'),
+  AI_PROVIDER: z.enum(['mock', 'gemini', 'groq']).default('mock'),
   GEMINI_API_KEY: z.string().optional(),
   AI_MODEL_NAME: z.string().default('gemini-1.5-flash'),
+  GROQ_API_KEY: z.string().optional(),
+  GROQ_MODEL_NAME: z.string().default('openai/gpt-oss-20b'),
 
   // WhatsApp
   WHATSAPP_PROVIDER: z.enum(['mock', 'cloud_api', 'baileys']).default('mock'),
@@ -21,12 +23,14 @@ const envSchema = z.object({
   WHATSAPP_ACCESS_TOKEN: z.string().optional(),
   WHATSAPP_VERIFY_TOKEN: z.string().default('whatsapp_secret_verify_token_123'),
   CLIENT_WHATSAPP_NUMBER: z.string().default('+919876543210'),
+  PHONE_ALERT_TOPIC: z.string().default('siva-alerts-0302'),
 
   // Email & Auto Sync
   EMAIL_PROVIDER: z.enum(['mock', 'gmail']).default('mock'),
   GOOGLE_CLIENT_ID: z.string().optional(),
   GOOGLE_CLIENT_SECRET: z.string().optional(),
   GOOGLE_REDIRECT_URI: z.string().default('http://localhost:3000/auth/google/callback'),
+  GMAIL_PUBSUB_TOPIC: z.string().optional(),
   AUTO_SYNC_ENABLED: z.string().transform((v) => v === 'true').default('true'),
   AUTO_SYNC_INTERVAL_SECONDS: z.coerce.number().default(10),
 
