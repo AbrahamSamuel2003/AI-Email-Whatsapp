@@ -37,7 +37,7 @@ export class GmailAuthService {
 
     return oauth2Client.generateAuthUrl({
       access_type: 'offline',
-      prompt: 'consent', // Forces refresh token generation
+      prompt: 'select_account consent', // Forces Google Account picker and refresh token generation
       scope: GMAIL_SCOPES,
       state: state || config.CLIENT_WHATSAPP_NUMBER,
     });
@@ -46,7 +46,7 @@ export class GmailAuthService {
   /**
    * Exchanges OAuth authorization code for tokens and persists account
    */
-  static async handleOAuthCallback(code: string, customWhatsAppNumber?: string) {
+  static async handleOAuthCallback(code: string, state?: string) {
     const oauth2Client = this.getOAuth2Client();
     const { tokens } = await oauth2Client.getToken(code);
     oauth2Client.setCredentials(tokens);
@@ -61,6 +61,19 @@ export class GmailAuthService {
       throw new Error('Failed to retrieve user email address from Google');
     }
 
+    let customWhatsAppNumber = state;
+    let customName: string | undefined = undefined;
+
+    if (state) {
+      try {
+        if (state.startsWith('{')) {
+          const parsed = JSON.parse(state);
+          customWhatsAppNumber = parsed.whatsapp;
+          customName = parsed.name;
+        }
+      } catch {}
+    }
+
     const whatsappNumber = customWhatsAppNumber || config.CLIENT_WHATSAPP_NUMBER;
 
     // Encrypt sensitive tokens
@@ -68,15 +81,26 @@ export class GmailAuthService {
     const encryptedRefreshToken = tokens.refresh_token ? encryptToken(tokens.refresh_token) : null;
     const tokenExpiry = tokens.expiry_date ? new Date(tokens.expiry_date) : null;
 
+    const existingUser = await prisma.user.findFirst({
+      where: {
+        OR: [
+          { whatsappNumber },
+          { email: emailAddress },
+        ],
+      },
+    });
+
+    const finalName = customName || existingUser?.name || displayName || 'Executive Client';
+
     // Find or create User
     const user = await prisma.user.upsert({
       where: { whatsappNumber },
       update: {
-        name: displayName,
+        name: finalName,
         email: emailAddress,
       },
       create: {
-        name: displayName,
+        name: finalName,
         email: emailAddress,
         whatsappNumber,
       },

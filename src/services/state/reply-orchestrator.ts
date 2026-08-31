@@ -19,13 +19,21 @@ export interface WhatsAppProcessingResult {
 
 export class WhatsAppReplyOrchestrator {
   static async handleInboundWhatsAppMessage(
-    inbound: WhatsAppInboundMessage
+    inbound: WhatsAppInboundMessage,
+    customProvider?: IWhatsAppProvider
   ): Promise<WhatsAppProcessingResult> {
     const whatsappNumber = inbound.from;
-    const clientText = inbound.text.trim();
+    const clientText = (inbound.text || inbound.body || (inbound as any).message || '').trim();
 
     const session = await SessionManager.getOrCreateSession(whatsappNumber);
-    const whatsappProvider = WhatsAppFactory.getProvider();
+    const whatsappProvider = customProvider || WhatsAppFactory.getProvider();
+
+    // 3-Minute Inactivity Window
+    const SESSION_TIMEOUT_MS = 3 * 60 * 1000;
+    const sessionAgeMs = Date.now() - new Date(session.updatedAt).getTime();
+    const isSessionExpired =
+      (session.state === 'NOTIFIED' || session.state === 'PREVIEW_GENERATED') &&
+      sessionAgeMs > SESSION_TIMEOUT_MS;
 
     // 1. Understand Intent using Groq LLM in ~150ms (Multilingual: English, Tamil, Hindi, Tanglish, Hinglish)
     const userIntent = await IntentClassifierService.classifyIntent(clientText, session.state);
@@ -33,16 +41,107 @@ export class WhatsAppReplyOrchestrator {
 
     // Check for cancel / reset command
     if (userIntent.intent === 'CANCEL_DRAFT') {
-      await SessionManager.resetSession(whatsappNumber);
+      const user = await prisma.user.findFirst({ where: { whatsappNumber } });
+      if (user) {
+        await prisma.whatsappSession.updateMany({
+          where: { userId: user.id },
+          data: {
+            state: 'IDLE',
+            activeThreadId: null,
+            activeMessageId: null,
+            generatedDraft: null,
+            lastClientText: null,
+            isSelectingMailbox: false,
+          },
+        });
+      }
+
       await whatsappProvider.sendTextMessage(
         whatsappNumber,
         [
-          `*[SESSION CLEARED]*`,
+          `*[SESSION CANCELLED]*`,
           `───────────────────────────`,
-          `Active draft has been cancelled. Ready for the next incoming email.`,
+          `Active draft discarded and reply session closed.`,
+          `Mailbox monitoring remains active in the background.`,
+          ``,
+          `• Reply *CHECK MAIL* to scan inbox.`,
+          `• Reply *SWITCH* to change active mailbox.`,
+          `• Reply *HELP* for full commands.`,
+          `───────────────────────────`,
         ].join('\n')
       );
-      return { action: 'SESSION_RESET', message: 'Session reset by user command' };
+      return { action: 'SESSION_RESET', message: 'Active draft session cancelled and closed' };
+    }
+
+    // Explicit CONTINUE / RESUME command to reactivate email reply session
+    if (userIntent.intent === 'CONTINUE') {
+      const activeMessage = await (prisma.emailMessage as any).findFirst({
+        where: {
+          id: session.activeMessageId || undefined,
+          isImportant: true,
+          isIgnored: false,
+          thread: {
+            emailAccount: { user: { whatsappNumber } },
+            outboundReplies: { none: { status: 'SENT' } },
+          },
+        },
+        include: { thread: true },
+        orderBy: { receivedAt: 'desc' },
+      }) || await (prisma.emailMessage as any).findFirst({
+        where: {
+          isImportant: true,
+          isIgnored: false,
+          thread: {
+            emailAccount: { user: { whatsappNumber } },
+            outboundReplies: { none: { status: 'SENT' } },
+          },
+        },
+        include: { thread: true },
+        orderBy: { receivedAt: 'desc' },
+      });
+
+      if (!activeMessage) {
+        await whatsappProvider.sendTextMessage(
+          whatsappNumber,
+          [
+            `*[NO ACTIVE EMAIL]*`,
+            `───────────────────────────`,
+            `No pending emails waiting for a reply.`,
+            `Send *CHECK MAIL* to view your inbox.`,
+          ].join('\n')
+        );
+        return { action: 'IGNORED', message: 'No active email to continue' };
+      }
+
+      await SessionManager.setNotifiedState(whatsappNumber, activeMessage.threadId, activeMessage.id);
+
+      const userObj = (await prisma.user.findFirst({ where: { whatsappNumber } })) as any;
+      const isTamil = userObj?.preferredLanguage === 'TAMIL';
+      const isHindi = userObj?.preferredLanguage === 'HINDI';
+
+      const resumeLines = [
+        isTamil
+          ? `*[மின்னஞ்சல் பதில் அமர்வு தொடரப்பட்டது]*`
+          : isHindi
+            ? `*[ईमेल उत्तर सत्र पुनः सक्रिय]*`
+            : `*[EMAIL REPLY SESSION ACTIVE]*`,
+        `───────────────────────────`,
+        `*From:* ${activeMessage.senderName || activeMessage.senderEmail}`,
+        `*Subject:* ${activeMessage.subject}`,
+        ``,
+        `*Message:*`,
+        `${activeMessage.cleanBody.trim().slice(0, 250)}`,
+        ``,
+        `───────────────────────────`,
+        isTamil
+          ? `பதிலளிக்க உங்கள் குரல் பதிவு அல்லது செய்தியை 3 நிமிடத்திற்குள் அனுப்பவும்.`
+          : isHindi
+            ? `उत्तर देने के लिए 3 मिनट के भीतर अपना संदेश या वॉइस नोट भेजें।`
+            : `Reply with your voice note or text instruction within 3 minutes to draft your response!`,
+      ];
+
+      await whatsappProvider.sendTextMessage(whatsappNumber, resumeLines.join('\n'));
+      return { action: 'IGNORED', message: `Resumed active reply session for email ${activeMessage.id}` };
     }
 
     // Check for UNKNOWN / Unclear voice message
@@ -68,7 +167,7 @@ export class WhatsAppReplyOrchestrator {
     if (userIntent.intent === 'SET_LANGUAGE') {
       const selectedLang = userIntent.extractedLanguage || (
         /tamil/i.test(clientText) ? 'TAMIL' :
-        /hindi/i.test(clientText) ? 'HINDI' : 'ENGLISH'
+          /hindi/i.test(clientText) ? 'HINDI' : 'ENGLISH'
       );
 
       await (prisma.user as any).updateMany({
@@ -109,103 +208,121 @@ export class WhatsAppReplyOrchestrator {
       };
     }
 
-    // IGNORE ALL / STOP REVIEW
-    if (userIntent.intent === 'IGNORE_ALL') {
-      await SessionManager.setConfirmedSentState(whatsappNumber);
-      const userObj = (await prisma.user.findFirst({ where: { whatsappNumber } })) as any;
-      const isTamil = userObj?.preferredLanguage === 'TAMIL';
-      const isHindi = userObj?.preferredLanguage === 'HINDI';
+    // SWITCH / LIST CONNECTED MAILBOXES
+    if (userIntent.intent === 'SWITCH_MAILBOX') {
+      const user = await prisma.user.findFirst({
+        where: { whatsappNumber },
+        include: { emailAccounts: { orderBy: { createdAt: 'asc' } } },
+      });
+
+      const accounts = user?.emailAccounts || [];
+      if (accounts.length === 0) {
+        await whatsappProvider.sendTextMessage(
+          whatsappNumber,
+          `*[NO MAILBOXES LINKED]*\n───────────────────────────\nPlease link your email accounts at: http://localhost:3005/?step=2`
+        );
+        return { action: 'IGNORED', message: 'No linked mailboxes found' };
+      }
+
+      if (accounts.length === 1) {
+        if (user) {
+          await prisma.whatsappSession.upsert({
+            where: { userId: user.id },
+            create: {
+              userId: user.id,
+              whatsappNumber,
+              activeEmailAccountId: accounts[0].id,
+              isSelectingMailbox: false,
+            },
+            update: {
+              activeEmailAccountId: accounts[0].id,
+              isSelectingMailbox: false,
+            },
+          });
+        }
+        await whatsappProvider.sendTextMessage(
+          whatsappNumber,
+          `*[SINGLE MAILBOX LINKED]*\n───────────────────────────\n📧 \`${accounts[0].emailAddress}\`\nThis is your only connected mailbox. To add more, visit: http://localhost:3005/?step=2`
+        );
+        return { action: 'IGNORED', message: 'Single mailbox active' };
+      }
+
+      const numbersEmoji = ['1️⃣', '2️⃣', '3️⃣', '4️⃣', '5️⃣', '6️⃣', '7️⃣', '8️⃣', '9️⃣', '🔟'];
+      const accountLines = accounts.map((acc, idx) => `${numbersEmoji[idx] || `${idx + 1}.`} ${acc.emailAddress}`);
+
+      if (user) {
+        await prisma.whatsappSession.upsert({
+          where: { userId: user.id },
+          create: {
+            userId: user.id,
+            whatsappNumber,
+            isSelectingMailbox: true,
+          },
+          update: {
+            isSelectingMailbox: true,
+          },
+        });
+      }
 
       await whatsappProvider.sendTextMessage(
         whatsappNumber,
         [
-          isTamil ? `*[மின்னஞ்சல் ஆய்வு நிறுத்தப்பட்டது]*` : isHindi ? `*[ईमेल समीक्षा रोकी गई]*` : `*[QUEUE STOPPED]*`,
+          `📬 *Select Active Mailbox:*`,
           `───────────────────────────`,
-          isTamil
-            ? `மீதமுள்ள அனைத்து மின்னஞ்சல்களும் தவிர்க்கப்பட்டன. உங்கள் இன்பாக்ஸ் கண்காணிக்கப்படுகிறது.`
-            : isHindi
-            ? `सभी शेष ईमेल छोड़ दिए गए। आपका इनबॉक्स सक्रिय है।`
-            : `All remaining pending emails ignored. Inbox monitoring active.`,
+          ...accountLines,
+          ``,
+          `👉 *Reply with 1, 2, or 3* to select which mailbox to open and monitor.`,
           `───────────────────────────`,
         ].join('\n')
       );
 
-      return {
-        action: 'IGNORED',
-        message: 'User chose to ignore all remaining emails',
-      };
+      return { action: 'IGNORED', message: 'Mailbox selection prompt sent' };
     }
 
-    // IGNORE CURRENT / SKIP TO NEXT EMAIL
-    if (userIntent.intent === 'IGNORE_CURRENT') {
-      const currentMsgId = session.activeMessageId;
-      const nextPendingMsg = await prisma.emailMessage.findFirst({
-        where: {
-          isImportant: true,
-          thread: {
-            emailAccount: { user: { whatsappNumber } },
-            outboundReplies: { none: { status: 'SENT' } },
-          },
-          ...(currentMsgId ? { id: { not: currentMsgId } } : {}),
-        },
-        orderBy: { receivedAt: 'desc' },
+    // USER REPLIES NUMBER WHILE IN isSelectingMailbox MODE
+    if (session.isSelectingMailbox && (/^\s*\d+\s*$/.test(clientText.trim()) || userIntent.extractedIndex)) {
+      const selectedIndex = parseInt(clientText.trim(), 10) || userIntent.extractedIndex;
+      const user = await prisma.user.findFirst({
+        where: { whatsappNumber },
+        include: { emailAccounts: { orderBy: { createdAt: 'asc' } } },
       });
 
-      const userObj = (await prisma.user.findFirst({ where: { whatsappNumber } })) as any;
-      const isTamil = userObj?.preferredLanguage === 'TAMIL';
-      const isHindi = userObj?.preferredLanguage === 'HINDI';
+      const accounts = user?.emailAccounts || [];
+      if (selectedIndex && selectedIndex >= 1 && selectedIndex <= accounts.length) {
+        const chosenAccount = accounts[selectedIndex - 1];
 
-      if (!nextPendingMsg) {
-        await SessionManager.setConfirmedSentState(whatsappNumber);
+        await prisma.whatsappSession.update({
+          where: { userId: user!.id },
+          data: {
+            activeEmailAccountId: chosenAccount.id,
+            isSelectingMailbox: false,
+          },
+        });
+
         await whatsappProvider.sendTextMessage(
           whatsappNumber,
           [
-            isTamil ? `*[வரிசை முடிந்தது]*` : isHindi ? `*[कतार समाप्त]*` : `*[END OF QUEUE]*`,
+            `✅ *Active Mailbox Selected!*`,
             `───────────────────────────`,
-            isTamil
-              ? `பதிலளிக்க வேண்டிய கூடுதல் மின்னஞ்சல்கள் எதுவும் இல்லை.`
-              : isHindi
-              ? `कतार में कोई और लंबित ईमेल नहीं है।`
-              : `No more pending emails in queue.`,
+            `📧 *Mailbox:* \`${chosenAccount.emailAddress}\``,
+            `⚡ Monitoring & replies are now active for this account.`,
             `───────────────────────────`,
+            `_Type *CHECK MAIL* to see unread emails or *SWITCH* to change mailbox._`,
           ].join('\n')
         );
-        return { action: 'IGNORED', message: 'No more emails in queue' };
+
+        return { action: 'IGNORED', message: `Active mailbox set to ${chosenAccount.emailAddress}` };
       }
-
-      await SessionManager.setNotifiedState(whatsappNumber, nextPendingMsg.threadId, nextPendingMsg.id);
-
-      const queuePrompt = [
-        isTamil ? `*[அடுத்த மின்னஞ்சல்]*` : isHindi ? `*[अगला ईमेल]*` : `*[NEXT EMAIL IN QUEUE]*`,
-        `───────────────────────────`,
-        `*From:* ${nextPendingMsg.senderName || nextPendingMsg.senderEmail}`,
-        `*Subject:* ${nextPendingMsg.subject}`,
-        ``,
-        `*Message:*`,
-        `${nextPendingMsg.cleanBody.trim().slice(0, 300)}`,
-        ``,
-        `───────────────────────────`,
-        isTamil
-          ? `இந்த மின்னஞ்சலுக்கான உங்கள் பதிலை அனுப்பவும் (அல்லது *IGNORE* / *IGNORE ALL* அனுப்பவும்).`
-          : isHindi
-          ? `इस ईमेल का जवाब भेजें (या *IGNORE* / *IGNORE ALL* भेजें)।`
-          : `Reply with your voice note or text (or send *IGNORE* / *IGNORE ALL*).`,
-      ].join('\n');
-
-      await whatsappProvider.sendTextMessage(whatsappNumber, queuePrompt);
-
-      return {
-        action: 'IGNORED',
-        message: `Skipped to next email in queue: ${nextPendingMsg.id}`,
-      };
     }
 
     // SELECT SPECIFIC EMAIL BY NUMBER (e.g. "reply 2", "select 1", "3")
     if (userIntent.intent === 'SELECT_EMAIL' && userIntent.extractedIndex) {
       const targetIndex = userIntent.extractedIndex;
-      const unrepliedEmails = await prisma.emailMessage.findMany({
+      const unrepliedEmails = await (prisma.emailMessage as any).findMany({
         where: {
           isImportant: true,
+          isIgnored: false,
+          actionRequired: { not: null },
           thread: {
             emailAccount: { user: { whatsappNumber } },
             outboundReplies: { none: { status: 'SENT' } },
@@ -234,8 +351,8 @@ export class WhatsAppReplyOrchestrator {
         isTamil
           ? `*[மின்னஞ்சல் #${targetIndex} தேர்ந்தெடுக்கப்பட்டது]*`
           : isHindi
-          ? `*[ईमेल #${targetIndex} चयनित]*`
-          : `*[EMAIL #${targetIndex} SELECTED]*`,
+            ? `*[ईमेल #${targetIndex} चयनित]*`
+            : `*[EMAIL #${targetIndex} SELECTED]*`,
         `───────────────────────────`,
         `*From:* ${selectedMsg.senderName || selectedMsg.senderEmail}`,
         `*Subject:* ${selectedMsg.subject}`,
@@ -247,8 +364,8 @@ export class WhatsAppReplyOrchestrator {
         isTamil
           ? `இந்த மின்னஞ்சலுக்கான உங்கள் பதிலை வாய்ஸ் நோட்டாகவோ அல்லது ஆங்கிலத்தில் தட்டச்சு செய்தோ அனுப்பவும்.`
           : isHindi
-          ? `इस ईमेल का जवाब वॉइस नोट या टेक्स्ट में भेजें।`
-          : `Reply with your voice note or text to draft your email reply.`,
+            ? `इस ईमेल का जवाब वॉइस नोट या टेक्स्ट में भेजें।`
+            : `Reply with your voice note or text to draft your email reply.`,
       ].join('\n');
 
       await whatsappProvider.sendTextMessage(whatsappNumber, selectPrompt);
@@ -262,9 +379,11 @@ export class WhatsAppReplyOrchestrator {
     // READ FULL EMAIL (e.g. "1 full", "read 1", "full 1", "mail 2 full")
     if (userIntent.intent === 'READ_FULL_EMAIL' && userIntent.extractedIndex) {
       const targetIndex = userIntent.extractedIndex;
-      const unrepliedEmails = await prisma.emailMessage.findMany({
+      const unrepliedEmails = await (prisma.emailMessage as any).findMany({
         where: {
           isImportant: true,
+          isIgnored: false,
+          actionRequired: { not: null },
           thread: {
             emailAccount: { user: { whatsappNumber } },
             outboundReplies: { none: { status: 'SENT' } },
@@ -304,8 +423,8 @@ export class WhatsAppReplyOrchestrator {
         isTamil
           ? `*[முழு மின்னஞ்சல் #${targetIndex}]*`
           : isHindi
-          ? `*[पूरा ईमेल #${targetIndex}]*`
-          : `*[FULL EMAIL #${targetIndex}]*`,
+            ? `*[पूरा ईमेल #${targetIndex}]*`
+            : `*[FULL EMAIL #${targetIndex}]*`,
         `───────────────────────────`,
         `*From:* ${senderDisplay}`,
         `*Subject:* ${selectedMsg.subject}`,
@@ -318,8 +437,8 @@ export class WhatsAppReplyOrchestrator {
         isTamil
           ? `*பதிலளிக்க:* உங்கள் குரல் பதிவு அல்லது செய்தியை அனுப்பவும்.\n*அனுப்ப:* *SEND* அனுப்பவும்.\n*தவிர்க்க:* *IGNORE* அனுப்பவும்.`
           : isHindi
-          ? `*उत्तर देने के लिए:* अपना संदेश या वॉइस नोट भेजें।\n*भेजने के लिए:* *SEND* भेजें।\n*छोड़ने के लिए:* *IGNORE* भेजें।`
-          : `*To Reply:* Send your voice note or text.\n*To Send Draft:* Reply *SEND*.\n*To Skip:* Send *IGNORE*.`,
+            ? `*उत्तर देने के लिए:* अपना संदेश या वॉइस नोट भेजें।\n*भेजने के लिए:* *SEND* भेजें।\n*छोड़ने के लिए:* *IGNORE* भेजें।`
+            : `*To Reply:* Send your voice note or text.\n*To Send Draft:* Reply *SEND*.\n*To Skip:* Send *IGNORE*.`,
       ].join('\n');
 
       await whatsappProvider.sendTextMessage(whatsappNumber, fullEmailPrompt);
@@ -332,34 +451,45 @@ export class WhatsAppReplyOrchestrator {
 
     // Check for "check mail" / "status" / "sync" in English, Tamil, Hindi
     if (userIntent.intent === 'CHECK_MAIL') {
-      // Find connected email account for this WhatsApp user
+      // Find connected email accounts for this WhatsApp user
       const user = await prisma.user.findFirst({
         where: { whatsappNumber },
-        include: { emailAccounts: true },
+        include: { emailAccounts: { orderBy: { createdAt: 'asc' } } },
       });
 
-      const emailAccount =
-        user?.emailAccounts?.find((acc) => acc.emailAddress === user.email && acc.provider === 'GMAIL') ||
-        user?.emailAccounts?.find((acc) => !acc.emailAddress.startsWith('oauth-test-') && acc.provider === 'GMAIL') ||
-        (await prisma.emailAccount.findFirst({
+      const accounts = user?.emailAccounts || [];
+      if (accounts.length === 0) {
+        const fallbackAcc = await prisma.emailAccount.findFirst({
           where: {
-            provider: 'GMAIL',
             NOT: { emailAddress: { startsWith: 'oauth-test-' } },
           },
-        }));
+        });
+        if (fallbackAcc) {
+          accounts.push(fallbackAcc);
+        }
+      }
 
-      if (!emailAccount) {
+      if (accounts.length === 0) {
         await whatsappProvider.sendTextMessage(
           whatsappNumber,
           [
             `*[INBOX STATUS]*`,
             `───────────────────────────`,
-            `No Gmail account connected yet.`,
-            `Visit http://localhost:3000/auth/google to connect your email.`,
+            `No email account connected yet.`,
+            `Connect your email at: http://localhost:3005/?step=2`,
             `───────────────────────────`,
           ].join('\n')
         );
-        return { action: 'IGNORED', message: 'No connected Gmail account found' };
+        return { action: 'IGNORED', message: 'No connected email accounts found' };
+      }
+
+      // Resolve active mailbox
+      let emailAccount = session.activeEmailAccountId
+        ? accounts.find((acc) => acc.id === session.activeEmailAccountId)
+        : null;
+
+      if (!emailAccount) {
+        emailAccount = accounts[0];
       }
 
       await whatsappProvider.sendTextMessage(
@@ -368,14 +498,20 @@ export class WhatsAppReplyOrchestrator {
       );
 
       try {
-        const { GmailSyncService } = await import('../email/gmail-sync.service.js');
-        // 1. Sync fresh emails from Gmail and let AI classify importance
-        await GmailSyncService.syncRecentEmails(emailAccount.id, 10);
+        if (emailAccount.provider === 'IMAP_SMTP') {
+          const { ImapSmtpService } = await import('../email/imap-smtp.service.js');
+          await ImapSmtpService.syncRecentEmails(emailAccount.id, 10, true);
+        } else {
+          const { GmailSyncService } = await import('../email/gmail-sync.service.js');
+          await GmailSyncService.syncRecentEmails(emailAccount.id, 10, true);
+        }
 
-        // 2. Query strictly IMPORTANT, unreplied actionable emails (up to 5)
-        const unrepliedEmails = await prisma.emailMessage.findMany({
+        // 2. Query strictly IMPORTANT, actionable unreplied emails (up to 5)
+        const unrepliedEmails = await (prisma.emailMessage as any).findMany({
           where: {
             isImportant: true,
+            isIgnored: false,
+            actionRequired: { not: null },
             thread: {
               emailAccountId: emailAccount.id,
               outboundReplies: { none: { status: 'SENT' } },
@@ -420,8 +556,8 @@ export class WhatsAppReplyOrchestrator {
             isTamil
               ? `*[மின்னஞ்சல் நிலை - ${unrepliedEmails.length} பதிலளிக்கப்படாதவை]*`
               : isHindi
-              ? `*[ईमेल स्थिति - ${unrepliedEmails.length} लंबित ईमेल]*`
-              : `*[INBOX STATUS - ${unrepliedEmails.length} UNREPLIED EMAIL(S)]*`,
+                ? `*[ईमेल स्थिति - ${unrepliedEmails.length} लंबित ईमेल]*`
+                : `*[INBOX STATUS - ${unrepliedEmails.length} UNREPLIED EMAIL(S)]*`,
             `───────────────────────────`,
             `*Account:* ${emailAccount.emailAddress}`,
             ``,
@@ -432,14 +568,31 @@ export class WhatsAppReplyOrchestrator {
             isTamil
               ? `*தேர்ந்தெடுக்கப்பட்ட மின்னஞ்சல்:* #1 (${primary.senderName || primary.senderEmail})\n_பதிலளிக்க உங்கள் குரல் பதிவு அல்லது செய்தியை அனுப்பவும்._`
               : isHindi
-              ? `*सक्रिय ईमेल चयनित:* #1 (${primary.senderName || primary.senderEmail})\n_उत्तर देने के लिए अपना संदेश या वॉइस नोट भेजें।_`
-              : `*Active Email Selected:* #1 (${primary.senderName || primary.senderEmail})\n_Reply with your voice note or text to draft a response!_`,
+                ? `*सक्रिय ईमेल चयनित:* #1 (${primary.senderName || primary.senderEmail})\n_उत्तर देने के लिए अपना संदेश या वॉइस नोट भेजें।_`
+                : `*Active Email Selected:* #1 (${primary.senderName || primary.senderEmail})\n_Reply with your voice note or text to draft a response!_`,
           ];
 
           await whatsappProvider.sendTextMessage(whatsappNumber, statusLines.join('\n'));
         }
       } catch (err: any) {
-        if (err.message?.includes('invalid_grant') || err.message?.includes('token')) {
+        const { AuditLogger } = await import('../logging/audit-logger.service.js');
+        AuditLogger.error('GMAIL_SYNC', `Check mail error for ${emailAccount.emailAddress}`, err);
+
+        if (err.message?.includes('Insufficient Permission') || err.message?.includes('insufficient_scope')) {
+          await whatsappProvider.sendTextMessage(
+            whatsappNumber,
+            [
+              `*[GMAIL PERMISSIONS REQUIRED]*`,
+              `───────────────────────────`,
+              `*Account:* ${emailAccount.emailAddress}`,
+              `Google reported: _Insufficient Permission_.`,
+              ``,
+              `👉 When signing in with Google, please check all permission checkboxes (to read & send emails).`,
+              `👉 Re-link here: http://localhost:3005/?step=2`,
+              `───────────────────────────`,
+            ].join('\n')
+          );
+        } else if (err.message?.includes('invalid_grant') || err.message?.includes('token')) {
           await whatsappProvider.sendTextMessage(
             whatsappNumber,
             [
@@ -448,7 +601,7 @@ export class WhatsAppReplyOrchestrator {
               `*Account:* ${emailAccount.emailAddress}`,
               `Your Gmail access token has expired.`,
               ``,
-              `👉 Click to re-link: http://localhost:3000/auth/google`,
+              `👉 Click to re-link: http://localhost:3005/?step=2`,
               `───────────────────────────`,
             ].join('\n')
           );
@@ -492,20 +645,58 @@ export class WhatsAppReplyOrchestrator {
         return { action: 'ERROR', message: 'Active email message not found in database' };
       }
 
-      const emailAccount = message.thread.emailAccount;
+      let emailAccount = message.thread.emailAccount;
+
+      // If the message's account has no tokens, fallback to the user's active authenticated Gmail account
+      if (emailAccount.provider === 'GMAIL' && !emailAccount.encryptedAccessToken && !emailAccount.encryptedRefreshToken) {
+        const activeAccount = await prisma.emailAccount.findFirst({
+          where: {
+            provider: 'GMAIL',
+            OR: [
+              { encryptedAccessToken: { not: null } },
+              { encryptedRefreshToken: { not: null } },
+            ],
+          },
+          orderBy: { updatedAt: 'desc' },
+        });
+        if (activeAccount) {
+          emailAccount = activeAccount;
+        }
+      }
+
       let emailProvider;
 
       if (emailAccount.provider === 'GMAIL' && (emailAccount.encryptedAccessToken || emailAccount.encryptedRefreshToken)) {
-        const authClient = await GmailAuthService.getAuthenticatedClientForAccount(emailAccount.id);
-        emailProvider = new GmailAdapter(authClient);
+        try {
+          const authClient = await GmailAuthService.getAuthenticatedClientForAccount(emailAccount.id);
+          emailProvider = new GmailAdapter(authClient);
+        } catch (authErr: any) {
+          await whatsappProvider.sendTextMessage(
+            whatsappNumber,
+            `*[GMAIL AUTHENTICATION ERROR]*\n───────────────────────────\nFailed to authenticate Gmail: ${authErr.message}\nPlease re-link at: http://localhost:3005/?step=2`
+          );
+          return { action: 'ERROR', message: authErr.message };
+        }
+      } else if (emailAccount.provider === 'IMAP_SMTP' && emailAccount.encryptedPassword && emailAccount.smtpHost) {
+        const { ImapSmtpAdapter } = await import('../email/imap-smtp.adapter.js');
+        emailProvider = new ImapSmtpAdapter({
+          emailAddress: emailAccount.emailAddress,
+          imapHost: emailAccount.imapHost || '',
+          imapPort: emailAccount.imapPort || 993,
+          imapUser: emailAccount.imapUser || emailAccount.emailAddress,
+          smtpHost: emailAccount.smtpHost,
+          smtpPort: emailAccount.smtpPort || 465,
+          smtpUser: emailAccount.smtpUser || emailAccount.emailAddress,
+          encryptedPassword: emailAccount.encryptedPassword,
+        });
+      } else if (emailAccount.provider === 'MOCK') {
+        emailProvider = EmailFactory.getProvider();
       } else {
-        const accessToken = emailAccount.encryptedAccessToken
-          ? decryptToken(emailAccount.encryptedAccessToken)
-          : undefined;
-        const refreshToken = emailAccount.encryptedRefreshToken
-          ? decryptToken(emailAccount.encryptedRefreshToken)
-          : undefined;
-        emailProvider = EmailFactory.getProvider(accessToken, refreshToken);
+        await whatsappProvider.sendTextMessage(
+          whatsappNumber,
+          `*[EMAIL ACCOUNT NOT LINKED]*\n───────────────────────────\nNo active email credentials found.\nPlease connect your Gmail or Custom Business Email at: http://localhost:3005/?step=2`
+        );
+        return { action: 'ERROR', message: 'No active email credentials found' };
       }
 
       // Build RFC 2822 threading references
@@ -557,9 +748,10 @@ export class WhatsAppReplyOrchestrator {
       await whatsappProvider.sendTextMessage(whatsappNumber, confirmationText);
 
       // Check if there are other pending unreplied important emails in the queue
-      const nextPendingMsg = await prisma.emailMessage.findFirst({
+      const nextPendingMsg = await (prisma.emailMessage as any).findFirst({
         where: {
           isImportant: true,
+          isIgnored: false,
           thread: {
             emailAccount: { user: { whatsappNumber } },
             outboundReplies: { none: { status: 'SENT' } },
@@ -588,8 +780,8 @@ export class WhatsAppReplyOrchestrator {
           isTamil
             ? `இந்த மின்னஞ்சலுக்கான உங்கள் பதிலை வாய்ஸ் நோட்டாகவோ அல்லது ஆங்கிலத்தில் தட்டச்சு செய்தோ அனுப்பவும்.`
             : isHindi
-            ? `इस ईमेल का जवाब वॉइस नोट या टेक्स्ट में भेजें।`
-            : `Reply with your voice note or text to draft this email reply.`,
+              ? `इस ईमेल का जवाब वॉइस नोट या टेक्स्ट में भेजें।`
+              : `Reply with your voice note or text to draft this email reply.`,
         ].join('\n');
 
         await whatsappProvider.sendTextMessage(whatsappNumber, queuePrompt);
@@ -602,15 +794,66 @@ export class WhatsAppReplyOrchestrator {
       };
     }
 
+    // Inactivity Timeout Check (>3 minutes since last email notification or preview)
+    if (isSessionExpired && userIntent.intent !== 'SEND_REPLY') {
+      const userObj = (await prisma.user.findFirst({ where: { whatsappNumber } })) as any;
+      const isTamil = userObj?.preferredLanguage === 'TAMIL';
+      const isHindi = userObj?.preferredLanguage === 'HINDI';
+
+      await whatsappProvider.sendTextMessage(
+        whatsappNumber,
+        [
+          isTamil
+            ? `⏱️ *[பதில் நேரம் முடிந்தது]*`
+            : isHindi
+              ? `⏱️ *[उत्तर सत्र समाप्त]*`
+              : `⏱️ *[REPLY WINDOW TIMED OUT]*`,
+          `───────────────────────────`,
+          isTamil
+            ? `3 நிமிடங்கள் ஆகியதால் முந்தைய மின்னஞ்சல் பதில் அமர்வு முடிவடைந்தது.`
+            : isHindi
+              ? `3 मिनट की निष्क्रियता के कारण ईमेल उत्तर सत्र बंद हो गया है।`
+              : `The 3-minute active reply window for your previous email has expired.`,
+          ``,
+          isTamil
+            ? `• இந்த மின்னஞ்சலுக்குப் பதிலளிக்க *CONTINUE* என அனுப்பவும்.\n• நிலுவையில் உள்ள மின்னஞ்சல்களைப் பார்க்க *CHECK MAIL* என அனுப்பவும்.`
+            : isHindi
+              ? `• इस ईमेल का उत्तर देने के लिए *CONTINUE* भेजें।\n• लंबित ईमेल देखने के लिए *CHECK MAIL* भेजें।`
+              : `• Reply *CONTINUE* to resume drafting a reply to this email.\n• Reply *CHECK MAIL* to view all pending emails.\n• Reply *HELP* for assistant commands.`,
+          `───────────────────────────`,
+        ].join('\n')
+      );
+      return { action: 'IGNORED', message: 'Ignored text because active reply window timed out (>3m)' };
+    }
+
+    // STATE: IDLE -> Do not draft replies to old emails on random casual chat
+    if (session.state === 'IDLE' && userIntent.intent === 'DRAFT_REPLY') {
+      await whatsappProvider.sendTextMessage(
+        whatsappNumber,
+        [
+          `💬 *SS40 AI Assistant*`,
+          `───────────────────────────`,
+          `No active email reply session is open.`,
+          ``,
+          `• Send *CHECK MAIL* to view your pending inbox.`,
+          `• Send *CONTINUE* to reply to your last email.`,
+          `• Send *HELP* for full commands & tips.`,
+          `───────────────────────────`,
+        ].join('\n')
+      );
+      return { action: 'IGNORED', message: 'Ignored casual chat in IDLE state' };
+    }
+
     // STATE: NOTIFIED or revising PREVIEW_GENERATED -> Generate AI Reply Draft
     if (session.state === 'NOTIFIED' || session.state === 'PREVIEW_GENERATED') {
       let targetMessageId = session.activeMessageId;
 
       if (!targetMessageId) {
         // Find latest unreplied important email
-        const unrepliedMsg = await prisma.emailMessage.findFirst({
+        const unrepliedMsg = await (prisma.emailMessage as any).findFirst({
           where: {
             isImportant: true,
+            isIgnored: false,
             thread: {
               emailAccount: { user: { whatsappNumber } },
               outboundReplies: { none: { status: 'SENT' } },
@@ -690,30 +933,63 @@ export class WhatsAppReplyOrchestrator {
       };
     }
 
-    // GREETING (hi, hello, vanakkam, namaste) -> Intro Menu
+    // GREETING (hi, hello, vanakkam, namaste, help) -> Intro Menu & Mailbox Selector
     if (userIntent.intent === 'HELP') {
-      const userObj = (await prisma.user.findFirst({ where: { whatsappNumber } })) as any;
+      const userObj = (await prisma.user.findFirst({
+        where: { whatsappNumber },
+        include: { emailAccounts: { orderBy: { createdAt: 'asc' } } },
+      })) as any;
       const isTamil = userObj?.preferredLanguage === 'TAMIL';
       const isHindi = userObj?.preferredLanguage === 'HINDI';
+      const accounts = userObj?.emailAccounts || [];
+
+      const numbersEmoji = ['1️⃣', '2️⃣', '3️⃣', '4️⃣', '5️⃣', '6️⃣', '7️⃣', '8️⃣', '9️⃣', '🔟'];
+      const accountLines = accounts.map((acc: any, idx: number) => {
+        const isCurrent = (session.activeEmailAccountId === acc.id || (!session.activeEmailAccountId && idx === 0)) ? ' ⚡ *(Active)*' : '';
+        return `${numbersEmoji[idx] || `${idx + 1}.`} ${acc.emailAddress}${isCurrent}`;
+      });
+
+      // If multiple accounts exist, enable mailbox selection mode
+      if (accounts.length > 1 && userObj) {
+        await prisma.whatsappSession.upsert({
+          where: { userId: userObj.id },
+          create: {
+            userId: userObj.id,
+            whatsappNumber,
+            isSelectingMailbox: true,
+          },
+          update: {
+            isSelectingMailbox: true,
+          },
+        });
+      }
+
+      const mailboxSection = accounts.length > 0 ? [
+        ``,
+        `📧 *Connected Mailboxes (${accounts.length}):*`,
+        ...accountLines,
+        ...(accounts.length > 1 ? [``, `👉 *Reply with 1, 2, or 3* to select which mailbox to open and monitor.`] : []),
+      ] : [];
 
       const greetingLines = [
         `*SS40 NETWORK AI EMAIL ASSISTANT*`,
         `───────────────────────────`,
         `*Status:* Active & Monitoring Inbox`,
+        ...mailboxSection,
         ``,
         `*Commands & Instructions:*`,
         isTamil
-          ? `• *CHECK MAIL* (குரல் பதிவு / உரை) அனுப்பினால் இன்பாக்ஸ் சரிபார்க்கப்படும்.\n• *SET LANGUAGE TAMIL*, *HINDI*, அல்லது *ENGLISH* மூலம் மொழியை மாற்றலாம்.\n• *SUPPORT* அனுப்பினால் தொடர்பு விவரங்களை பெறலாம்.\n• புதிய மின்னஞ்சல் வந்தால் உங்கள் குரல் பதிவு மூலம் பதிலளிக்கலாம்.\n• *SEND* அனுப்பினால் மின்னஞ்சல் அனுப்பப்படும்.\n• *IGNORE* / *IGNORE ALL* மூலம் மின்னஞ்சல்களை தவிர்க்கலாம்.`
+          ? `• *CHECK MAIL* (குரல் பதிவு / உரை) அனுப்பினால் இன்பாக்ஸ் சரிபார்க்கப்படும்.\n• *SWITCH* அனுப்பினால் மின்னஞ்சலை மாற்றலாம்.\n• *SET LANGUAGE TAMIL*, *HINDI*, அல்லது *ENGLISH* மூலம் மொழியை மாற்றலாம்.\n• *SUPPORT* அனுப்பினால் தொடர்பு விவரங்களை பெறலாம்.\n• புதிய மின்னஞ்சல் வந்தால் உங்கள் குரல் பதிவு மூலம் பதிலளிக்கலாம்.\n• *SEND* அனுப்பினால் மின்னஞ்சல் அனுப்பப்படும்.\n• *IGNORE* / *IGNORE ALL* மூலம் மின்னஞ்சல்களை தவிர்க்கலாம்.`
           : isHindi
-          ? `• *CHECK MAIL* (वॉइस नोट / टेक्स्ट) भेजकर इनबॉक्स चेक करें।\n• *SET LANGUAGE HINDI*, *TAMIL*, या *ENGLISH* से भाषा बदलें।\n• *SUPPORT* भेजकर संपर्क विवरण देखें।\n• नया ईमेल आने पर वॉइस नोट द्वारा उत्तर दें।\n• *SEND* भेजकर ईमेल भेजें।\n• *IGNORE* / *IGNORE ALL* से ईमेल छोड़ें।`
-          : `• Send *CHECK MAIL* (or voice note) to scan your inbox.\n• Send *SET LANGUAGE TAMIL*, *HINDI*, or *ENGLISH* to customize translations.\n• Send *SUPPORT* to view contact channels & website.\n• When an email arrives, reply via voice note or text in any language.\n• Reply *SEND* to approve and dispatch in Corporate English.\n• Send *IGNORE* (next email) or *IGNORE ALL* (stop review).`,
+            ? `• *CHECK MAIL* (वॉइस नोट / टेक्स्ट) भेजकर इनबॉक्स चेक करें।\n• *SWITCH* भेजकर ईमेल बदलें।\n• *SET LANGUAGE HINDI*, *TAMIL*, या *ENGLISH* से भाषा बदलें।\n• *SUPPORT* भेजकर संपर्क विवरण देखें।\n• नया ईमेल आने पर वॉइस नोट द्वारा उत्तर दें।\n• *SEND* भेजकर ईमेल भेजें।\n• *IGNORE* / *IGNORE ALL* से ईमेल छोड़ें।`
+            : `• Send *CHECK MAIL* (or voice note) to scan your inbox.\n• Send *SWITCH* to change your active mailbox.\n• Send *SET LANGUAGE TAMIL*, *HINDI*, or *ENGLISH* to customize translations.\n• Send *SUPPORT* to view contact channels & website.\n• When an email arrives, reply via voice note or text in any language.\n• Reply *SEND* to approve and dispatch in Corporate English.\n• Send *IGNORE* (next email) or *IGNORE ALL* (stop review).`,
         `───────────────────────────`,
       ];
 
       await whatsappProvider.sendTextMessage(whatsappNumber, greetingLines.join('\n'));
       return {
         action: 'IGNORED',
-        message: 'Intro menu sent for greeting',
+        message: 'Intro menu sent for greeting with mailbox selector',
       };
     }
 
@@ -729,8 +1005,8 @@ export class WhatsAppReplyOrchestrator {
         isTamil
           ? `உங்களுக்கு உதவி அல்லது ஆதரவு தேவைப்பட்டால், எங்கள் வலைத்தளத்தைப் பார்வையிடவும்:\n*வலைத்தளம்:* https://www.ss40network.com\n\nஇங்கே நீங்கள் எங்கள் தொடர்பு விவரங்களை (Contacts) சரிபார்க்கலாம்.\n\n*மின்னஞ்சல்:* support@ss40network.com`
           : isHindi
-          ? `यदि आपको सहायता की आवश्यकता है, तो हमारी वेबसाइट देखें:\n*वेबसाइट:* https://www.ss40network.com\n\nयहाँ आप हमारे संपर्क विवरण (Contacts) देख सकते हैं।\n\n*ईमेल:* support@ss40network.com`
-          : `If you need support or assistance, please check out our website:\n*Website:* https://www.ss40network.com\n\nCheck it out here to view our direct contact channels and team details.\n\n*Support Email:* support@ss40network.com`,
+            ? `यदि आपको सहायता की आवश्यकता है, तो हमारी वेबसाइट देखें:\n*वेबसाइट:* https://www.ss40network.com\n\nयहाँ आप हमारे संपर्क विवरण (Contacts) देख सकते हैं।\n\n*ईमेल:* support@ss40network.com`
+            : `If you need support or assistance, please check out our website:\n*Website:* https://www.ss40network.com\n\nCheck it out here to view our direct contact channels and team details.\n\n*Support Email:* support@ss40network.com`,
         `───────────────────────────`,
       ];
 
@@ -753,8 +1029,8 @@ export class WhatsAppReplyOrchestrator {
         isTamil
           ? `நன்றி எனக்கு அல்ல, SS40 NETWORK-க்கு சொல்லுங்கள்! நான் SS40 NETWORK பொறியாளர்களால் உருவாக்கப்பட்ட உங்கள் AI மின்னஞ்சல் உதவியாளர்.\n\nஎப்படியிருந்தாலும், மிக்க மகிழ்ச்சி! உங்களுக்கு உதவ நான் எப்போதும் தயாராக உள்ளேன்.`
           : isHindi
-          ? `धन्यवाद मुझे नहीं, SS40 NETWORK को कहें! मैं SS40 NETWORK इंजीनियर्स द्वारा विकसित आपका AI ईमेल सहायक हूँ।\n\nवैसे आपका स्वागत है! मुझे आपकी मदद करके खुशी हुई।`
-          : `Thanks to SS40 NETWORK, not me! I'm your email assistant developed by SS40 NETWORK Engineers.\n\nAnyways, welcome! I'm happy to help you.`,
+            ? `धन्यवाद मुझे नहीं, SS40 NETWORK को कहें! मैं SS40 NETWORK इंजीनियर्स द्वारा विकसित आपका AI ईमेल सहायक हूँ।\n\nवैसे आपका स्वागत है! मुझे आपकी मदद करके खुशी हुई।`
+            : `Thanks to SS40 NETWORK, not me! I'm your email assistant developed by SS40 NETWORK Engineers.\n\nAnyways, welcome! I'm happy to help you.`,
         `───────────────────────────`,
       ];
 

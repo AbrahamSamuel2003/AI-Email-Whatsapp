@@ -100,11 +100,15 @@ export class GroqAIAdapter implements IAIProvider {
       };
     } catch (err: any) {
       if (this.geminiFallback) {
-        console.log(`[Groq RateLimit/Error] ${err.message}. Seamlessly switching to Gemini AI failover...`);
-        return this.geminiFallback.classifyImportance(email);
+        try {
+          console.log(`[Groq Failover] ${err.message}. Seamlessly switching to Gemini AI...`);
+          return await this.geminiFallback.classifyImportance(email, preferredLanguage);
+        } catch (geminiErr: any) {
+          console.warn(`[Gemini Failover Error] ${geminiErr.message}. Falling back to resilient local parser.`);
+        }
       }
-      console.warn(`[Groq AI Warning] ${err.message}. Using resilient local fallback parser.`);
-      return this.mockFallback.classifyImportance(email);
+      console.warn(`[AI Engine] ${err.message}. Using resilient local fallback parser.`);
+      return this.mockFallback.classifyImportance(email, preferredLanguage);
     }
   }
 
@@ -150,10 +154,14 @@ export class GroqAIAdapter implements IAIProvider {
       };
     } catch (err: any) {
       if (this.geminiFallback) {
-        console.log(`[Groq RateLimit/Error] ${err.message}. Seamlessly switching to Gemini AI failover...`);
-        return this.geminiFallback.generateReply(context);
+        try {
+          console.log(`[Groq Failover] ${err.message}. Seamlessly switching to Gemini AI...`);
+          return await this.geminiFallback.generateReply(context);
+        } catch (geminiErr: any) {
+          console.warn(`[Gemini Failover Error] ${geminiErr.message}. Falling back to resilient local generator.`);
+        }
       }
-      console.warn(`[Groq AI Warning] ${err.message}. Using resilient local reply generator.`);
+      console.warn(`[AI Engine] ${err.message}. Using resilient local reply generator.`);
       return this.mockFallback.generateReply(context);
     }
   }

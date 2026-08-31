@@ -3,6 +3,7 @@ import makeWASocket, {
   downloadMediaMessage,
   useMultiFileAuthState,
   WASocket,
+  Browsers,
 } from '@whiskeysockets/baileys';
 import pino from 'pino';
 import qrcode from 'qrcode-terminal';
@@ -11,25 +12,21 @@ import { WhatsAppInboundMessage } from '../../core/types.js';
 import { WhatsAppReplyOrchestrator } from '../state/reply-orchestrator.js';
 import { VoiceTranscriberService } from '../ai/voice-transcriber.service.js';
 import { config } from '../../config/env.js';
+import { prisma } from '../../db/prisma.js';
 import path from 'path';
 import fs from 'fs';
 
-interface UserSocketSession {
-  phoneNumber: string;
-  authDir: string;
-  sock: WASocket | null;
-  isReady: boolean;
-  latestQr: string | null;
-  startTime: number;
-}
-
 export class BaileysAdapter implements IWhatsAppProvider {
-  private sessions: Map<string, UserSocketSession> = new Map();
   private baseAuthDir: string = path.resolve(process.cwd(), 'baileys_auth');
+  private sock: WASocket | null = null;
+  private isReady: boolean = false;
+  private latestQr: string | null = null;
+  private connectedPhone: string | null = null;
   private sentMessageIds: Set<string> = new Set();
+  private welcomeDispatchedSet: Set<string> = new Set();
 
   constructor() {
-    this.initializeAllSessions();
+    this.startSocket(true);
   }
 
   private isBotOutput(text: string): boolean {
@@ -53,31 +50,9 @@ export class BaileysAdapter implements IWhatsAppProvider {
     );
   }
 
-  private cleanPhone(phone: string): string {
+  private cleanPhone(phone?: string): string {
+    if (!phone) return '';
     return phone.replace(/\D/g, '');
-  }
-
-  private async initializeAllSessions(): Promise<void> {
-    if (!fs.existsSync(this.baseAuthDir)) {
-      fs.mkdirSync(this.baseAuthDir, { recursive: true });
-    }
-
-    // 1. Initialize default configured client
-    const defaultNumber = this.cleanPhone(config.CLIENT_WHATSAPP_NUMBER);
-    await this.initSessionForNumber(defaultNumber, true);
-
-    // 2. Discover any other user sessions saved in ./baileys_auth/
-    try {
-      const subdirs = fs.readdirSync(this.baseAuthDir, { withFileTypes: true })
-        .filter((d) => d.isDirectory())
-        .map((d) => d.name);
-
-      for (const dirName of subdirs) {
-        if (dirName !== defaultNumber && /^\d+$/.test(dirName)) {
-          await this.initSessionForNumber(dirName, false);
-        }
-      }
-    } catch {}
   }
 
   private extractMessageText(msg: any): string {
@@ -99,41 +74,28 @@ export class BaileysAdapter implements IWhatsAppProvider {
     );
   }
 
-  async initSessionForNumber(phoneNumber: string, printTerminalQr: boolean = false): Promise<UserSocketSession> {
-    const cleanNum = this.cleanPhone(phoneNumber);
-    const existing = this.sessions.get(cleanNum);
-    if (existing && existing.sock && existing.isReady) {
-      return existing;
+  /**
+   * Starts the single unified WASocket connection
+   */
+  async startSocket(printTerminalQr: boolean = true): Promise<void> {
+    if (!fs.existsSync(this.baseAuthDir)) {
+      fs.mkdirSync(this.baseAuthDir, { recursive: true });
     }
-
-    const sessionAuthDir = path.join(this.baseAuthDir, cleanNum);
-    if (!fs.existsSync(sessionAuthDir)) {
-      fs.mkdirSync(sessionAuthDir, { recursive: true });
-    }
-
-    const session: UserSocketSession = {
-      phoneNumber: cleanNum,
-      authDir: sessionAuthDir,
-      sock: null,
-      isReady: false,
-      latestQr: null,
-      startTime: Date.now(),
-    };
-
-    this.sessions.set(cleanNum, session);
 
     try {
-      const { state, saveCreds } = await useMultiFileAuthState(sessionAuthDir);
+      const { state, saveCreds } = await useMultiFileAuthState(this.baseAuthDir);
 
       const sock = makeWASocket({
         auth: state,
         logger: pino({ level: 'silent' }) as any,
         printQRInTerminal: false,
-        syncFullHistory: false, // Memory-saving optimization for KVM 1 VPS
-        browser: ['AI Email Assistant', 'Chrome', '1.0.0'],
+        syncFullHistory: false, // Memory optimization
+        browser: Browsers.macOS('Desktop'),
+        connectTimeoutMs: 60_000,
+        defaultQueryTimeoutMs: 60_000,
       });
 
-      session.sock = sock;
+      this.sock = sock;
 
       sock.ev.on('creds.update', saveCreds);
 
@@ -141,10 +103,10 @@ export class BaileysAdapter implements IWhatsAppProvider {
         const { connection, lastDisconnect, qr } = update;
 
         if (qr) {
-          session.latestQr = qr;
+          this.latestQr = qr;
           if (printTerminalQr) {
             console.log('\n' + '═'.repeat(60));
-            console.log(`📲 SCAN QR CODE FOR +${cleanNum}:`);
+            console.log('📲 SCAN THIS QR CODE WITH WHATSAPP ON YOUR PHONE:');
             console.log('   (WhatsApp > Settings > Linked Devices > Link a Device)');
             console.log('═'.repeat(60) + '\n');
             qrcode.generate(qr, { small: true });
@@ -153,46 +115,115 @@ export class BaileysAdapter implements IWhatsAppProvider {
 
         if (connection === 'close') {
           const statusCode = (lastDisconnect?.error as any)?.output?.statusCode;
-          session.isReady = false;
+          this.isReady = false;
 
           if (statusCode === DisconnectReason.loggedOut || statusCode === 401) {
-            console.log(`\n⚠️ [WhatsApp +${cleanNum}] Device unlinked. Clearing session auth...`);
+            console.log(`\n⚠️ [WhatsApp] Session logged out / unlinked. Resetting auth directory...`);
+            this.connectedPhone = null;
+            this.latestQr = null;
             try {
-              if (fs.existsSync(sessionAuthDir)) {
-                fs.rmSync(sessionAuthDir, { recursive: true, force: true });
+              if (fs.existsSync(this.baseAuthDir)) {
+                fs.rmSync(this.baseAuthDir, { recursive: true, force: true });
               }
             } catch {}
-            setTimeout(() => this.initSessionForNumber(cleanNum, false), 1500);
+            setTimeout(() => this.startSocket(true), 2000);
           } else {
-            console.log(`[WhatsApp +${cleanNum}] Reconnecting connection (code: ${statusCode || 'temp'})...`);
-            setTimeout(() => this.initSessionForNumber(cleanNum, false), 2000);
+            console.log(`[WhatsApp] Reconnecting connection (status code: ${statusCode || 'temp'})...`);
+            setTimeout(() => this.startSocket(false), 3000);
           }
         } else if (connection === 'open') {
-          session.isReady = true;
-          session.latestQr = null;
-          session.startTime = Date.now();
-          const userJid = sock.user?.id;
+          this.isReady = true;
+          this.latestQr = null;
+          const userJid = sock.user?.id || '';
+          const detectedPhone = userJid.split(':')[0]?.split('@')[0] || '';
+          this.connectedPhone = detectedPhone;
+
           console.log('\n' + '═'.repeat(60));
-          console.log(`✅ [WhatsApp +${cleanNum}] Connected Successfully!`);
-          console.log(`📱 Logged in as: ${userJid?.split(':')[0] || userJid}`);
+          console.log(`✅ [WhatsApp +${detectedPhone}] Connected Successfully!`);
+          console.log(`📱 Logged in as: ${userJid.split(':')[0] || userJid}`);
           console.log('═'.repeat(60) + '\n');
+
+          // Dynamically associate connected phone number with primary user in DB
+          if (detectedPhone) {
+            try {
+              const formattedPhone = `+${detectedPhone}`;
+              const existingUser = await prisma.user.findFirst({
+                where: {
+                  OR: [
+                    { whatsappNumber: formattedPhone },
+                    { whatsappNumber: detectedPhone },
+                  ],
+                },
+              });
+
+              if (!existingUser) {
+                const latestUser = await prisma.user.findFirst({
+                  orderBy: { createdAt: 'desc' },
+                });
+                if (latestUser) {
+                  await prisma.user.update({
+                    where: { id: latestUser.id },
+                    data: { whatsappNumber: formattedPhone },
+                  });
+                }
+              }
+            } catch (err: any) {}
+
+            // Dispatch automated onboarding greeting
+            if (!this.welcomeDispatchedSet.has(detectedPhone)) {
+              this.welcomeDispatchedSet.add(detectedPhone);
+              setTimeout(() => {
+                this.sendWelcomeGreeting(`+${detectedPhone}`).catch((e) =>
+                  console.warn('[Welcome Message Warning]', e.message)
+                );
+              }, 2000);
+            }
+          }
         }
       });
 
-      // Listen for incoming messages (both notify and append for self-chat sync)
+      // Listen for incoming messages
       sock.ev.on('messages.upsert', async (m) => {
         for (const msg of m.messages) {
           const rawRemoteJid = msg.key?.remoteJid || '';
-          if (!rawRemoteJid || rawRemoteJid === 'status@broadcast' || rawRemoteJid.endsWith('@g.us')) {
+          if (
+            !rawRemoteJid ||
+            rawRemoteJid === 'status@broadcast' ||
+            rawRemoteJid.endsWith('@g.us') ||
+            rawRemoteJid.endsWith('@newsletter') ||
+            rawRemoteJid.endsWith('@broadcast')
+          ) {
             continue;
           }
 
           const msgId = msg.key?.id || '';
           if (this.sentMessageIds.has(msgId)) continue;
 
+          // Zero-interference privacy filter: only accept user's own sent messages
+          if (!msg.key?.fromMe) {
+            continue;
+          }
+
+          // Strict Self-Chat Isolation: ONLY accept messages sent to YOURSELF (Self-Chat / Notes to Self)
+          const myPhone = this.connectedPhone || (sock.user?.id?.split(':')[0]?.split('@')[0] || '').replace(/\D/g, '');
+          const myJidBase = sock.user?.id ? sock.user.id.split(':')[0].split('@')[0] : myPhone;
+          const myLidBase = (sock.user?.lid || (sock as any).authState?.creds?.me?.lid)?.split(':')[0]?.split('@')[0];
+
+          const chatJidBase = rawRemoteJid.split(':')[0].split('@')[0];
+
+          const isSelfChat = 
+            (myPhone && chatJidBase === myPhone) ||
+            (myJidBase && chatJidBase === myJidBase) ||
+            (myLidBase && chatJidBase === myLidBase);
+
+          if (!isSelfChat) {
+            // This message was sent in a chat with another person -> Ignore completely!
+            continue;
+          }
+
           let text = this.extractMessageText(msg);
 
-          // Check if message is a voice note / audio message
+          // Check for voice note audio message
           const isAudio = Boolean(
             msg.message?.audioMessage ||
             msg.message?.ephemeralMessage?.message?.audioMessage ||
@@ -217,147 +248,201 @@ export class BaileysAdapter implements IWhatsAppProvider {
 
           if (!text || !text.trim() || this.isBotOutput(text)) continue;
 
-          // STRICT ZERO-INTERFERENCE PRIVACY FILTER:
-          // 1. Ignore groups, broadcasts, and newsletters
-          if (
-            rawRemoteJid.endsWith('@g.us') ||
-            rawRemoteJid.includes('@newsletter') ||
-            rawRemoteJid === 'status@broadcast'
-          ) {
-            continue;
+          const senderNumber = myPhone || this.cleanPhone(config.CLIENT_WHATSAPP_NUMBER);
+          console.log(`💬 [WhatsApp Inbound Self-Chat] Received: "${text}"`);
+
+          const inbound: WhatsAppInboundMessage = {
+            id: msgId || `inbound-${Date.now()}`,
+            from: `+${senderNumber}`,
+            body: text.trim(),
+            timestamp: new Date(Number(msg.messageTimestamp) * 1000 || Date.now()),
+            isVoiceNote: isAudio,
+          };
+
+          try {
+            await WhatsAppReplyOrchestrator.handleInboundWhatsAppMessage(inbound, this);
+          } catch (err: any) {
+            console.error('[WhatsApp Orchestrator Error]', err.message);
           }
-
-          // 2. ONLY accept messages sent by YOU (fromMe === true)
-          // Any incoming messages from friends, family, contacts, or Meta AI (fromMe === false) are ignored!
-          if (!msg.key?.fromMe) {
-            continue;
-          }
-
-          // 3. ONLY accept messages inside your personal "Message Yourself" / Self-Chat thread
-          // Messages you send to any other person (friends, family, coworkers) are strictly ignored!
-          const myUserPhone = (sock.user?.id?.split(':')[0]?.split('@')[0] || cleanNum).replace(/\D/g, '');
-          const myUserLid = (
-            (sock.user as any)?.lid?.split(':')[0]?.split('@')[0] ||
-            (sock.authState as any)?.creds?.me?.lid?.split(':')[0]?.split('@')[0] ||
-            ''
-          );
-          const remoteClean = rawRemoteJid.split(':')[0]?.split('@')[0]?.replace(/\D/g, '') || '';
-
-          const isMySelfPhone = Boolean(
-            (cleanNum && remoteClean === cleanNum) ||
-            (myUserPhone && remoteClean === myUserPhone)
-          );
-          const isMySelfLid = Boolean(
-            myUserLid && (rawRemoteJid.startsWith(`${myUserLid}@`) || rawRemoteJid.startsWith(`${myUserLid}:`))
-          );
-
-          // If this message was sent to another person's chat (their phone or their LID), IGNORE IT!
-          if (!isMySelfPhone && !isMySelfLid) {
-            continue;
-          }
-
-          // Format clean fromPhone
-          let senderNum = cleanNum || myUserPhone;
-
-          const fromPhone = `+${senderNum}`;
-          const msgTimestamp = Number(msg.messageTimestamp) * 1000 || Date.now();
-
-          console.log(`\n💬 [WhatsApp Inbound] Received from (${fromPhone}): "${text.trim()}"`);
-          await WhatsAppReplyOrchestrator.handleInboundWhatsAppMessage({
-            from: fromPhone,
-            messageId: msgId || `baileys-msg-${Date.now()}`,
-            text: text.trim(),
-            timestamp: msgTimestamp,
-          });
         }
       });
-
-      return session;
     } catch (err: any) {
-      console.error(`[Baileys Multi-Session Error for ${cleanNum}]`, err.message);
-      return session;
+      console.error('[Baileys Socket Startup Error]', err.message);
     }
   }
 
-  getLatestQrForNumber(phoneNumber: string): string | null {
+  getLatestQr(): string | null {
+    return this.latestQr;
+  }
+
+  getLatestQrForNumber(_phone?: string): string | null {
+    return this.latestQr;
+  }
+
+  isSessionReady(_phone?: string): boolean {
+    return this.isReady;
+  }
+
+  getConnectedPhoneNumber(): string | null {
+    return this.connectedPhone ? `+${this.connectedPhone}` : null;
+  }
+
+  async requestPairingCodeForNumber(phoneNumber: string): Promise<string> {
     const cleanNum = this.cleanPhone(phoneNumber);
-    return this.sessions.get(cleanNum)?.latestQr || null;
+    if (!cleanNum) {
+      throw new Error('Please enter a valid phone number with country code');
+    }
+
+    if (this.isReady) {
+      throw new Error(`WhatsApp is already connected! (Phone: +${this.connectedPhone || cleanNum})`);
+    }
+
+    if (!this.sock) {
+      await this.startSocket(false);
+      await new Promise((r) => setTimeout(r, 1500));
+    }
+
+    if (!this.sock) {
+      throw new Error('WhatsApp connection is initializing. Please try again in a few seconds.');
+    }
+
+    // Call Baileys requestPairingCode on live socket
+    const rawCode = await this.sock.requestPairingCode(cleanNum);
+    const formatted = rawCode?.match(/.{1,4}/g)?.join('-') || rawCode;
+    console.log(`\n🔑 [WhatsApp Pairing Code] Generated for +${cleanNum}: ${formatted}\n`);
+    return formatted;
+  }
+
+  async sendWelcomeGreeting(phoneNumber: string): Promise<void> {
+    const cleanNum = this.cleanPhone(phoneNumber) || this.connectedPhone;
+    const formattedPhone = `+${cleanNum}`;
+
+    const user = (await prisma.user.findFirst({
+      where: {
+        OR: [
+          { whatsappNumber: formattedPhone },
+          { whatsappNumber: cleanNum },
+        ],
+      },
+      include: { emailAccounts: { orderBy: { updatedAt: 'desc' } } },
+    })) || (await prisma.user.findFirst({
+      include: { emailAccounts: { orderBy: { updatedAt: 'desc' } } },
+      orderBy: { updatedAt: 'desc' },
+    }));
+
+    const allAccounts = user?.emailAccounts || [];
+    const clientName = user?.name || 'Executive Client';
+
+    const numbersEmoji = ['1️⃣', '2️⃣', '3️⃣', '4️⃣', '5️⃣', '6️⃣', '7️⃣', '8️⃣', '9️⃣', '🔟'];
+
+    let emailSection = '';
+    if (allAccounts.length > 1) {
+      const accountLines = allAccounts.map((acc, idx) => `${numbersEmoji[idx] || `${idx + 1}.`} ${acc.emailAddress}`);
+      emailSection = [
+        `📧 *Connected Mailboxes (${allAccounts.length}):*`,
+        ...accountLines,
+        ``,
+        `👉 *Reply with 1, 2, or 3* to select which mailbox to open and monitor.`,
+      ].join('\n');
+
+      if (user) {
+        await prisma.whatsappSession.upsert({
+          where: { userId: user.id },
+          create: {
+            userId: user.id,
+            whatsappNumber: formattedPhone,
+            state: 'IDLE',
+            isSelectingMailbox: true,
+            activeEmailAccountId: allAccounts[0].id,
+          },
+          update: {
+            isSelectingMailbox: true,
+            activeEmailAccountId: allAccounts[0].id,
+          },
+        });
+      }
+    } else {
+      const singleEmail = allAccounts[0]?.emailAddress || 'Connected Mailbox';
+      emailSection = `📧 *Connected Mail:* \`${singleEmail}\``;
+    }
+
+    const welcomeLines = [
+      `🤖 *SS40 AI Email Assistant Activated!*`,
+      `───────────────────────────`,
+      `Hi *${clientName}*,`,
+      ``,
+      `Your AI Executive Assistant is active and monitoring your mailbox.`,
+      ``,
+      emailSection,
+      `📱 *Connected WhatsApp:* \`${formattedPhone}\``,
+      `───────────────────────────`,
+      `🏢 *Company:* SS40 Network`,
+      `💬 *Support:* ${config.ADMIN_SUPPORT_EMAIL}`,
+      `🌐 *Portal:* ${config.SS40_PORTAL_URL}`,
+      `───────────────────────────`,
+    ];
+
+    await this.sendTextMessage(formattedPhone, welcomeLines.join('\n'));
   }
 
   getActiveSessionsCount(): number {
-    let count = 0;
-    for (const session of this.sessions.values()) {
-      if (session.isReady) count++;
-    }
-    return count;
-  }
-
-  private async getReadySession(targetNumber: string, timeoutMs: number = 20000): Promise<UserSocketSession> {
-    const cleanNum = this.cleanPhone(targetNumber);
-    let session = this.sessions.get(cleanNum);
-
-    if (!session) {
-      session = await this.initSessionForNumber(cleanNum, false);
-    }
-
-    if (session.isReady && session.sock?.user?.id) return session;
-
-    // Fall back to default session if target is not ready
-    const defaultNum = this.cleanPhone(config.CLIENT_WHATSAPP_NUMBER);
-    const defaultSession = this.sessions.get(defaultNum);
-    if (defaultSession?.isReady && defaultSession.sock?.user?.id) {
-      return defaultSession;
-    }
-
-    const start = Date.now();
-    while ((!session.isReady || !session.sock?.user?.id) && Date.now() - start < timeoutMs) {
-      await new Promise((r) => setTimeout(r, 600));
-    }
-
-    if (!session.sock || !session.isReady) {
-      if (defaultSession?.isReady && defaultSession.sock) {
-        return defaultSession;
-      }
-      throw new Error(`WhatsApp connection for ${targetNumber} is not ready. Please scan the QR code first.`);
-    }
-
-    return session;
+    return this.isReady ? 1 : 0;
   }
 
   async sendTextMessage(to: string, body: string): Promise<WhatsAppSendResult> {
-    const session = await this.getReadySession(to);
-
-    if (!session.sock) {
-      throw new Error('Baileys socket is not initialized');
+    if (!this.sock || !this.isReady) {
+      // Wait up to 10s if socket is establishing
+      const start = Date.now();
+      while ((!this.sock || !this.isReady) && Date.now() - start < 10000) {
+        await new Promise((r) => setTimeout(r, 500));
+      }
     }
 
-    const cleanNumber = this.cleanPhone(to);
+    if (!this.sock || !this.isReady) {
+      throw new Error(`WhatsApp connection is not ready. Please scan the QR code first.`);
+    }
+
+    let cleanNumber = this.cleanPhone(to) || this.connectedPhone;
+    const myUserPhone = (this.sock.user?.id?.split(':')[0]?.split('@')[0] || '').replace(/\D/g, '');
+    if (!cleanNumber || cleanNumber.length < 10) {
+      if (myUserPhone && myUserPhone.length >= 10) {
+        cleanNumber = myUserPhone;
+      }
+    }
+
     const jid = `${cleanNumber}@s.whatsapp.net`;
+    console.log(`📤 [WhatsApp Outbound] Sending message to ${jid}...`);
 
-    const sent = await session.sock.sendMessage(jid, { text: body });
+    const sent = await this.sock.sendMessage(jid, { text: body });
     const messageId = sent?.key?.id || `baileys-${Date.now()}`;
-
     this.sentMessageIds.add(messageId);
 
     return {
       messageId,
       recipient: to,
-      timestamp: new Date(),
       status: 'SENT',
+      timestamp: new Date(),
     };
   }
 
   async sendInteractiveMessage(
     to: string,
     body: string,
-    buttons: Array<{ id: string; title: string }>
+    _buttons: Array<{ id: string; title: string }>
   ): Promise<WhatsAppSendResult> {
-    const buttonPrompt = buttons.map((b) => `Reply *${b.title}*`).join('\n');
-    const fullText = `${body}\n\n${buttonPrompt}`;
-    return this.sendTextMessage(to, fullText);
+    return this.sendTextMessage(to, body);
   }
 
-  parseInboundWebhook(_body: any): WhatsAppInboundMessage | null {
+  parseInboundWebhook(body: any): WhatsAppInboundMessage | null {
+    if (body?.from && (body?.text || body?.body)) {
+      return {
+        id: body.id || `baileys-in-${Date.now()}`,
+        from: body.from,
+        body: (body.text || body.body || '').trim(),
+        timestamp: new Date(body.timestamp || Date.now()),
+        isVoiceNote: Boolean(body.isVoiceNote),
+      };
+    }
     return null;
   }
 }

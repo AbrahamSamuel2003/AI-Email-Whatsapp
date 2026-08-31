@@ -7,6 +7,7 @@ import { TaskQueueManager } from '../queue/task-queue.js';
 import { prisma } from '../db/prisma.js';
 import { GmailAuthService } from '../services/email/gmail-auth.service.js';
 import { GmailSyncService } from '../services/email/gmail-sync.service.js';
+import { getOnboardingHtml } from './onboarding-ui.js';
 
 export async function buildServer(): Promise<FastifyInstance> {
   const server = Fastify({
@@ -15,6 +16,29 @@ export async function buildServer(): Promise<FastifyInstance> {
 
   await server.register(cors);
   await server.register(sensible);
+
+  // Onboarding Portal UI
+  server.get('/', async (request, reply) => {
+    const query = request.query as any;
+    const phone = query.whatsapp || query.phone || config.CLIENT_WHATSAPP_NUMBER;
+    return reply
+      .header('Cache-Control', 'no-cache, no-store, must-revalidate')
+      .header('Pragma', 'no-cache')
+      .header('Expires', '0')
+      .type('text/html')
+      .send(getOnboardingHtml(phone));
+  });
+
+  server.get('/connect', async (request, reply) => {
+    const query = request.query as any;
+    const phone = query.whatsapp || query.phone || config.CLIENT_WHATSAPP_NUMBER;
+    return reply
+      .header('Cache-Control', 'no-cache, no-store, must-revalidate')
+      .header('Pragma', 'no-cache')
+      .header('Expires', '0')
+      .type('text/html')
+      .send(getOnboardingHtml(phone));
+  });
 
   // Liveness Check
   server.get('/health', async () => {
@@ -94,10 +118,12 @@ export async function buildServer(): Promise<FastifyInstance> {
   server.get('/auth/google', async (request, reply) => {
     const query = request.query as any;
     const customWhatsApp = query.whatsapp || config.CLIENT_WHATSAPP_NUMBER;
+    const customName = query.name || undefined;
     const format = query.format;
 
     try {
-      const authUrl = GmailAuthService.generateAuthUrl(customWhatsApp);
+      const statePayload = JSON.stringify({ whatsapp: customWhatsApp, name: customName });
+      const authUrl = GmailAuthService.generateAuthUrl(statePayload);
 
       if (format === 'json') {
         return reply.code(200).send({ authUrl });
@@ -113,6 +139,22 @@ export async function buildServer(): Promise<FastifyInstance> {
     }
   });
 
+  // Updates User Profile (Full Name) from UI
+  server.post('/api/user/profile', async (request, reply) => {
+    const body = (request.body as any) || {};
+    const name = body.name?.trim();
+    if (name) {
+      const user = await prisma.user.findFirst({ orderBy: { updatedAt: 'desc' } });
+      if (user) {
+        await prisma.user.update({
+          where: { id: user.id },
+          data: { name },
+        });
+      }
+    }
+    return reply.code(200).send({ status: 'ok', name });
+  });
+
   // Handles Google OAuth callback
   server.get('/auth/google/callback', async (request, reply) => {
     const query = request.query as any;
@@ -125,41 +167,8 @@ export async function buildServer(): Promise<FastifyInstance> {
 
     try {
       const result = await GmailAuthService.handleOAuthCallback(code, state);
-
-      const html = `
-        <!DOCTYPE html>
-        <html>
-        <head>
-          <title>Google Account Connected</title>
-          <style>
-            body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #0f172a; color: #f8fafc; display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0; }
-            .card { background: #1e293b; padding: 2.5rem; border-radius: 12px; box-shadow: 0 10px 25px rgba(0,0,0,0.5); max-width: 480px; text-align: center; border: 1px solid #334155; }
-            .badge { background: #10b981; color: #fff; padding: 6px 14px; border-radius: 20px; font-weight: bold; font-size: 0.9rem; display: inline-block; margin-bottom: 1rem; }
-            h2 { margin: 0 0 10px; color: #f8fafc; }
-            p { color: #94a3b8; line-height: 1.5; }
-            .details { background: #0f172a; padding: 1rem; border-radius: 8px; text-align: left; margin: 1.5rem 0; font-family: monospace; font-size: 0.85rem; }
-            .details div { margin-bottom: 5px; }
-            .details strong { color: #38bdf8; }
-          </style>
-        </head>
-        <body>
-          <div class="card">
-            <div class="badge">Connected Successfully</div>
-            <h2>Gmail Account Linked</h2>
-            <p>Your Gmail account has been securely connected and tokens are encrypted.</p>
-            <div class="details">
-              <div><strong>Account:</strong> ${result.emailAddress}</div>
-              <div><strong>User:</strong> ${result.displayName}</div>
-              <div><strong>WhatsApp:</strong> ${result.user.whatsappNumber}</div>
-              <div><strong>Status:</strong> Ready for Sync & Reply</div>
-            </div>
-            <p style="font-size: 0.85rem;">You can now close this tab and return to the terminal or simulator.</p>
-          </div>
-        </body>
-        </html>
-      `;
-
-      return reply.type('text/html').send(html);
+      // Redirect back to Onboarding Portal Step 3 with WhatsApp number
+      return reply.redirect(`/?step=3&whatsapp=${encodeURIComponent(result.user.whatsappNumber)}`);
     } catch (err: any) {
       server.log.error(`OAuth callback error: ${err.message}`);
       return reply.code(500).send({
@@ -169,9 +178,89 @@ export async function buildServer(): Promise<FastifyInstance> {
     }
   });
 
-  // -------------------------------------------------------------
-  // Gmail Sync & Watch Endpoints
-  // -------------------------------------------------------------
+  // Detect IMAP/SMTP server presets by email domain
+  server.post('/api/email/detect-preset', async (request, reply) => {
+    const body = (request.body as any) || {};
+    const emailAddress = body.emailAddress || '';
+    const { ImapSmtpService } = await import('../services/email/imap-smtp.service.js');
+    const preset = await ImapSmtpService.detectServerPreset(emailAddress);
+    return reply.code(200).send(preset);
+  });
+
+  // Verify IMAP & SMTP connection before saving
+  server.post('/api/email/verify-smtp', async (request, reply) => {
+    const body = (request.body as any) || {};
+    const { ImapSmtpAdapter } = await import('../services/email/imap-smtp.adapter.js');
+    const { encryptToken } = await import('../services/crypto/encryption.js');
+
+    try {
+      const encryptedPassword = encryptToken(body.password || '');
+      const result = await ImapSmtpAdapter.verifyConnection({
+        emailAddress: body.emailAddress,
+        imapHost: body.imapHost,
+        imapPort: Number(body.imapPort) || 993,
+        imapUser: body.imapUser || body.emailAddress,
+        smtpHost: body.smtpHost,
+        smtpPort: Number(body.smtpPort) || 465,
+        smtpUser: body.smtpUser || body.emailAddress,
+        encryptedPassword,
+      });
+
+      if (!result.imap || !result.smtp) {
+        return reply.code(400).send({ success: false, error: result.error });
+      }
+
+      return reply.code(200).send({ success: true, message: 'IMAP & SMTP connection verified successfully!' });
+    } catch (err: any) {
+      return reply.code(400).send({ success: false, error: err.message });
+    }
+  });
+
+  // Connect Custom IMAP/SMTP Email Account
+  server.post('/api/email/connect-smtp', async (request, reply) => {
+    const body = (request.body as any) || {};
+    const { ImapSmtpService } = await import('../services/email/imap-smtp.service.js');
+
+    try {
+      let user = await prisma.user.findFirst({
+        orderBy: { updatedAt: 'desc' },
+      });
+
+      if (!user) {
+        user = await prisma.user.create({
+          data: {
+            name: body.userName || 'Executive Client',
+            email: body.emailAddress,
+            whatsappNumber: body.whatsappNumber || config.CLIENT_WHATSAPP_NUMBER,
+          },
+        });
+      }
+
+      const result = await ImapSmtpService.connectMailbox({
+        userId: user.id,
+        emailAddress: body.emailAddress,
+        password: body.password,
+        imapHost: body.imapHost,
+        imapPort: Number(body.imapPort) || 993,
+        imapUser: body.imapUser,
+        smtpHost: body.smtpHost,
+        smtpPort: Number(body.smtpPort) || 465,
+        smtpUser: body.smtpUser,
+      });
+
+      return reply.code(200).send({
+        success: true,
+        emailAddress: result.emailAccount.emailAddress,
+        provider: result.emailAccount.provider,
+        message: 'Custom business email connected and monitoring active!',
+      });
+    } catch (err: any) {
+      return reply.code(400).send({
+        success: false,
+        error: err.message,
+      });
+    }
+  });
 
   // Trigger manual sync of recent Gmail inbox messages
   server.post('/gmail/sync', async (request, reply) => {
@@ -318,6 +407,117 @@ export async function buildServer(): Promise<FastifyInstance> {
     `;
 
     return reply.type('text/html').send(html);
+  });
+
+  // API to fetch QR Data as JSON for UI components
+  server.get('/api/whatsapp/qr-data', async (request, reply) => {
+    const provider = WhatsAppFactory.getProvider() as any;
+
+    if (typeof provider.getLatestQr !== 'function' && typeof provider.getLatestQrForNumber !== 'function') {
+      return reply.code(200).send({ qr: null, connected: true });
+    }
+
+    let qr = typeof provider.getLatestQr === 'function' ? provider.getLatestQr() : provider.getLatestQrForNumber();
+    const isReady = typeof provider.isSessionReady === 'function' ? provider.isSessionReady() : false;
+    const connectedPhone = typeof provider.getConnectedPhoneNumber === 'function' ? provider.getConnectedPhoneNumber() : null;
+
+    if (!qr && !isReady) {
+      const start = Date.now();
+      while (!qr && !provider.isSessionReady() && Date.now() - start < 3500) {
+        await new Promise((r) => setTimeout(r, 200));
+        qr = typeof provider.getLatestQr === 'function' ? provider.getLatestQr() : provider.getLatestQrForNumber();
+      }
+    }
+
+    return reply.code(200).send({
+      qr,
+      connected: isReady,
+      connectedPhone,
+    });
+  });
+
+  // API to generate 8-Digit Pairing Code on demand
+  server.post('/api/whatsapp/pairing-code', async (request, reply) => {
+    const body = (request.body as any) || {};
+    const phone = body.phone || config.CLIENT_WHATSAPP_NUMBER;
+    const provider = WhatsAppFactory.getProvider() as any;
+
+    if (typeof provider.requestPairingCodeForNumber !== 'function') {
+      return reply.code(400).send({ error: 'Pairing code is only available when WHATSAPP_PROVIDER=baileys' });
+    }
+
+    try {
+      const code = await provider.requestPairingCodeForNumber(phone);
+      return reply.code(200).send({ status: 'ok', phone, code });
+    } catch (err: any) {
+      return reply.code(200).send({ status: 'error', message: err.message, code: null });
+    }
+  });
+
+  // API to check user connection status (Gmail & WhatsApp)
+  server.get('/api/user/status', async (request, reply) => {
+    const provider = WhatsAppFactory.getProvider() as any;
+    const whatsappConnected = typeof provider.isSessionReady === 'function'
+      ? provider.isSessionReady()
+      : (typeof provider.getActiveSessionsCount === 'function' ? provider.getActiveSessionsCount() > 0 : true);
+    const connectedPhone = typeof provider.getConnectedPhoneNumber === 'function'
+      ? provider.getConnectedPhoneNumber()
+      : null;
+
+    // Find the active connected Email account (Gmail or IMAP_SMTP)
+    const emailAccount = await prisma.emailAccount.findFirst({
+      where: {
+        OR: [
+          { provider: 'GMAIL', encryptedAccessToken: { not: null } },
+          { provider: 'GMAIL', encryptedRefreshToken: { not: null } },
+          { provider: 'IMAP_SMTP', encryptedPassword: { not: null } },
+        ],
+      },
+      include: { user: true },
+      orderBy: { updatedAt: 'desc' },
+    });
+
+    const user = emailAccount?.user || (await prisma.user.findFirst({
+      orderBy: { updatedAt: 'desc' },
+      include: { emailAccounts: { orderBy: { createdAt: 'asc' } } },
+    }));
+
+    const allAccounts = user?.emailAccounts || (emailAccount ? [emailAccount] : []);
+
+    return reply.code(200).send({
+      whatsappNumber: connectedPhone || user?.whatsappNumber || config.CLIENT_WHATSAPP_NUMBER,
+      userName: user?.name || 'Executive Client',
+      emailConnected: Boolean(emailAccount || allAccounts.length > 0),
+      emailAddress: emailAccount?.emailAddress || allAccounts[0]?.emailAddress || null,
+      provider: emailAccount?.provider || allAccounts[0]?.provider || 'GMAIL',
+      emailAccounts: allAccounts.map((a) => ({
+        id: a.id,
+        email: a.emailAddress,
+        provider: a.provider,
+      })),
+      whatsappConnected,
+      timestamp: new Date().toISOString(),
+    });
+  });
+
+  // API to dispatch welcome greeting to WhatsApp
+  server.post('/api/user/welcome', async (request, reply) => {
+    const body = (request.body as any) || {};
+    const provider = WhatsAppFactory.getProvider() as any;
+    const connectedPhone = typeof provider.getConnectedPhoneNumber === 'function' ? provider.getConnectedPhoneNumber() : null;
+
+    let whatsapp = body.whatsapp || connectedPhone;
+    if (!whatsapp) {
+      const user = await prisma.user.findFirst({ orderBy: { updatedAt: 'desc' } });
+      whatsapp = user?.whatsappNumber || config.CLIENT_WHATSAPP_NUMBER;
+    }
+
+    if (typeof provider.sendWelcomeGreeting === 'function') {
+      await provider.sendWelcomeGreeting(whatsapp);
+      return reply.code(200).send({ status: 'dispatched', whatsapp });
+    }
+
+    return reply.code(200).send({ status: 'mock_dispatched', whatsapp });
   });
 
   // Enable Pub/Sub watch for all connected Gmail accounts

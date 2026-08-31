@@ -6,8 +6,53 @@ export class SessionManager {
    * Finds or creates a WhatsApp session for a given phone number
    */
   static async getOrCreateSession(whatsappNumber: string) {
-    let session = await prisma.whatsappSession.findUnique({
-      where: { whatsappNumber },
+    const cleanNumber = whatsappNumber.replace(/\D/g, '');
+    const formattedNumber = `+${cleanNumber}`;
+
+    // 1. Find user by either format (+91... or 91... or exact)
+    let user = await prisma.user.findFirst({
+      where: {
+        OR: [
+          { whatsappNumber: formattedNumber },
+          { whatsappNumber: cleanNumber },
+          { whatsappNumber },
+        ],
+      },
+      include: {
+        emailAccounts: true,
+      },
+    });
+
+    if (!user) {
+      const defaultEmail = `client-${cleanNumber || Date.now()}@company.com`;
+      user = await prisma.user.create({
+        data: {
+          name: 'Client',
+          email: defaultEmail,
+          whatsappNumber: formattedNumber,
+          emailAccounts: {
+            create: {
+              provider: 'MOCK',
+              emailAddress: defaultEmail,
+            },
+          },
+        },
+        include: {
+          emailAccounts: true,
+        },
+      });
+    }
+
+    // 2. Find existing session by userId OR whatsappNumber
+    let session = await prisma.whatsappSession.findFirst({
+      where: {
+        OR: [
+          { userId: user.id },
+          { whatsappNumber: formattedNumber },
+          { whatsappNumber: cleanNumber },
+          { whatsappNumber },
+        ],
+      },
       include: {
         user: {
           include: {
@@ -17,45 +62,42 @@ export class SessionManager {
       },
     });
 
-    if (!session) {
-      // Find or create default user for this WhatsApp number
-      let user = await prisma.user.findUnique({
-        where: { whatsappNumber },
-        include: { emailAccounts: true },
-      });
-
-      if (!user) {
-        user = await prisma.user.create({
+    if (session) {
+      // Normalize number and associate to current user if needed
+      if (session.whatsappNumber !== formattedNumber || session.userId !== user.id) {
+        session = await prisma.whatsappSession.update({
+          where: { id: session.id },
           data: {
-            name: 'Client',
-            email: 'client@company.com',
-            whatsappNumber,
-            emailAccounts: {
-              create: {
-                provider: 'MOCK',
-                emailAddress: 'client@company.com',
+            userId: user.id,
+            whatsappNumber: formattedNumber,
+          },
+          include: {
+            user: {
+              include: {
+                emailAccounts: true,
               },
             },
           },
-          include: { emailAccounts: true },
         });
       }
+      return session;
+    }
 
-      session = await prisma.whatsappSession.create({
-        data: {
-          userId: user.id,
-          whatsappNumber,
-          state: 'IDLE',
-        },
-        include: {
-          user: {
-            include: {
-              emailAccounts: true,
-            },
+    // 3. Create fresh session
+    session = await prisma.whatsappSession.create({
+      data: {
+        userId: user.id,
+        whatsappNumber: formattedNumber,
+        state: 'IDLE',
+      },
+      include: {
+        user: {
+          include: {
+            emailAccounts: true,
           },
         },
-      });
-    }
+      },
+    });
 
     return session;
   }

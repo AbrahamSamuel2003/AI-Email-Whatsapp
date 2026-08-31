@@ -10,7 +10,8 @@ export class GmailSyncService {
    */
   static async syncRecentEmails(
     emailAccountId: string,
-    maxEmails: number = 10
+    maxEmails: number = 10,
+    isQuiet: boolean = false
   ): Promise<{ syncedCount: number; messageIds: string[] }> {
     const account = await prisma.emailAccount.findUnique({
       where: { id: emailAccountId },
@@ -49,7 +50,8 @@ export class GmailSyncService {
         }
 
         const metadata = await gmailAdapter.fetchMessage(msgId);
-        await TaskQueueManager.enqueueEmail(metadata);
+        const { EmailIngestionPipeline } = await import('./ingestion-pipeline.js');
+        await EmailIngestionPipeline.processIncomingEmail(metadata, account.userId, isQuiet);
         processedIds.push(msgId);
         // Sequential throttle to prevent AI concurrency bursts
         await new Promise((r) => setTimeout(r, 600));

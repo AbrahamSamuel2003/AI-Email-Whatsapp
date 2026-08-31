@@ -2,6 +2,8 @@ import { config } from '../../config/env.js';
 
 export type UserIntentType =
   | 'CHECK_MAIL'
+  | 'SWITCH_MAILBOX'
+  | 'CONTINUE'
   | 'SEND_REPLY'
   | 'CANCEL_DRAFT'
   | 'IGNORE_CURRENT'
@@ -33,6 +35,24 @@ export class IntentClassifierService {
     sessionState: string
   ): Promise<UserIntentResult> {
     const norm = userInput.toLowerCase().trim();
+
+    // Fast-path: Switch or list connected mailboxes
+    if (/^(switch|accounts|switch\s*mail|switch\s*mailbox|change\s*mail|change\s*mailbox|mailboxes|inboxes|select\s*mail|account|mails)[\s!.]*$/i.test(norm)) {
+      return {
+        intent: 'SWITCH_MAILBOX',
+        confidence: 1.0,
+        extractedMeaning: 'User wants to list or switch active mailboxes',
+      };
+    }
+
+    // Fast-path 0: Instant 0ms resume / continue email reply session
+    if (/^(continue|resume|reply|thodaru|jari\s*rakhein|marupadiyum|continue\s*reply)[\s!.]*$/i.test(norm)) {
+      return {
+        intent: 'CONTINUE',
+        confidence: 1.0,
+        extractedMeaning: 'User wants to resume drafting reply to active email',
+      };
+    }
 
     // Fast-path 1: Instant 0ms greeting detection
     if (/^(hi|hello|hey|vanakkam|vannakam|namaste|namasthe|வணக்கம்|नमस्ते)[\s!.]*$/i.test(norm)) {

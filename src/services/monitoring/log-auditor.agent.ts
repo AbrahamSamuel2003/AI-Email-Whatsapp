@@ -121,10 +121,13 @@ export class LogAuditorAgent {
    */
   static async formatTerminalAudit(): Promise<string> {
     const report = await this.auditSystemHealth();
+    const { AuditLogger } = await import('../logging/audit-logger.service.js');
+    const errorScan = AuditLogger.scanRecentErrors(5);
+
     const lines: string[] = [];
 
     lines.push('═'.repeat(65));
-    lines.push(`🔍 SS40 NETWORK: AUTONOMOUS SYSTEM HEALTH AUDIT`);
+    lines.push(`🔍 SS40 NETWORK: PRODUCTION AUDIT & ERROR DIAGNOSTIC REPORT`);
     lines.push(`Overall Status:   [${report.status}]`);
     lines.push(`Uptime:           ${Math.floor(report.uptimeSeconds / 60)}m ${report.uptimeSeconds % 60}s`);
     lines.push(`Timestamp:        ${report.timestamp.toISOString()}`);
@@ -139,6 +142,20 @@ export class LogAuditorAgent {
     lines.push(`  • Ingested Emails:  ${report.metrics.processedEmailsToday}`);
     lines.push(`  • Active Sessions:  ${report.metrics.activeSessions}`);
     lines.push(`  • Incidents (24h):  ${report.metrics.recentIncidentsCount}`);
+    lines.push('─'.repeat(65));
+    lines.push(`🚨 ERROR & LOG AUDIT TRAIL (${errorScan.totalErrors} recent warning/error events):`);
+    if (errorScan.errors.length === 0) {
+      lines.push(`  • Zero active errors. Terminal and background services clean.`);
+    } else {
+      errorScan.diagnostics.forEach((d) => {
+        lines.push(`  • [${d.category}] ${d.count} event(s) - Reason: ${d.commonReason}`);
+      });
+      lines.push(``);
+      lines.push(`  Recent Log Entries:`);
+      errorScan.errors.forEach((e) => {
+        lines.push(`    - [${e.level}] [${e.category}] ${e.message} ${e.error?.message ? `(Error: ${e.error.message})` : ''}`);
+      });
+    }
     lines.push('─'.repeat(65));
     lines.push(`💡 DIAGNOSTIC RECOMMENDATIONS:`);
     for (const rec of report.recommendations) {

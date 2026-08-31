@@ -24,12 +24,19 @@ model User {
 model EmailAccount {
   id                    String          @id @default(uuid())
   userId                String
-  provider              String          // "GMAIL" | "OUTLOOK" | "MOCK"
+  provider              String          // "GMAIL" | "OUTLOOK" | "ZOHO" | "IMAP_SMTP" | "MOCK"
   emailAddress          String
   encryptedAccessToken  String?
   encryptedRefreshToken String?
   tokenExpiry           DateTime?
   syncCursor            String?
+  imapHost              String?
+  imapPort              Int?
+  imapUser              String?
+  smtpHost              String?
+  smtpPort              Int?
+  smtpUser              String?
+  encryptedPassword     String?         // AES-256-GCM encrypted App Password
   createdAt             DateTime        @default(now())
   updatedAt             DateTime        @updatedAt
   user                  User            @relation(fields: [userId], references: [id], onDelete: Cascade)
@@ -73,6 +80,7 @@ model EmailMessage {
   importanceReason  String?
   urgency           String?         @default("LOW") // "LOW" | "MEDIUM" | "HIGH"
   actionRequired    String?
+  isIgnored         Boolean         @default(false)
   createdAt         DateTime        @default(now())
   thread            EmailThread     @relation(fields: [threadId], references: [id], onDelete: Cascade)
 
@@ -80,17 +88,19 @@ model EmailMessage {
 }
 
 model WhatsappSession {
-  id              String            @id @default(uuid())
-  userId          String            @unique
-  whatsappNumber  String            @unique
-  state           String            @default("IDLE") // "IDLE" | "NOTIFIED" | "PREVIEW_GENERATED" | "CONFIRMED_SENT"
-  activeThreadId  String?
-  activeMessageId String?
-  generatedDraft  String?
-  lastClientText  String?
-  updatedAt       DateTime          @updatedAt
-  createdAt       DateTime          @default(now())
-  user            User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  id                    String            @id @default(uuid())
+  userId                String            @unique
+  whatsappNumber        String            @unique
+  state                 String            @default("IDLE") // "IDLE" | "NOTIFIED" | "PREVIEW_GENERATED" | "CONFIRMED_SENT"
+  activeEmailAccountId  String?
+  isSelectingMailbox    Boolean           @default(false)
+  activeThreadId        String?
+  activeMessageId       String?
+  generatedDraft        String?
+  lastClientText        String?
+  updatedAt             DateTime          @updatedAt
+  createdAt             DateTime          @default(now())
+  user                  User              @relation(fields: [userId], references: [id], onDelete: Cascade)
 }
 
 model OutboundEmail {

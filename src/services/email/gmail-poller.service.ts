@@ -38,6 +38,7 @@ export class GmailPollerService {
     this.isPolling = true;
 
     try {
+      // 1. Poll Gmail OAuth accounts
       const gmailAccounts = await prisma.emailAccount.findMany({
         where: {
           provider: 'GMAIL',
@@ -55,14 +56,46 @@ export class GmailPollerService {
             console.log(`⚡ [Gmail Poller] Auto-detected and processed ${res.syncedCount} new email(s) for ${account.emailAddress}!`);
           }
         } catch (err: any) {
-          // Log only unexpected errors, silent on no-change
-          if (!err.message?.includes('invalid_grant')) {
+          const { AuditLogger } = await import('../logging/audit-logger.service.js');
+          AuditLogger.error('GMAIL_SYNC', `Sync error for ${account.emailAddress}`, err, {
+            email: account.emailAddress,
+          });
+
+          if (err.message?.includes('Insufficient Permission')) {
+            console.warn(`⚠️ [Gmail Poller] ${account.emailAddress} is missing Gmail OAuth permissions. Re-link at http://localhost:3005/?step=2 and check permission boxes.`);
+          } else if (!err.message?.includes('invalid_grant')) {
             console.warn(`[Gmail Poller] Sync error for ${account.emailAddress}:`, err.message);
           }
         }
       }
+
+      // 2. Poll Custom Business Email / Zoho / Outlook IMAP accounts
+      const imapAccounts = await prisma.emailAccount.findMany({
+        where: {
+          provider: 'IMAP_SMTP',
+          NOT: [{ encryptedPassword: null }],
+        },
+      });
+
+      for (const account of imapAccounts) {
+        try {
+          const { ImapSmtpService } = await import('./imap-smtp.service.js');
+          const res = await ImapSmtpService.syncRecentEmails(account.id, 5);
+          if (res.syncedCount > 0) {
+            console.log(`⚡ [IMAP Poller] Auto-detected and processed ${res.syncedCount} new email(s) for ${account.emailAddress}!`);
+          }
+        } catch (err: any) {
+          const { AuditLogger } = await import('../logging/audit-logger.service.js');
+          AuditLogger.error('GMAIL_SYNC', `IMAP sync error for ${account.emailAddress}`, err, {
+            email: account.emailAddress,
+          });
+          console.warn(`[IMAP Poller] Sync error for ${account.emailAddress}:`, err.message);
+        }
+      }
     } catch (err: any) {
-      console.error('[Gmail Poller Error]', err.message);
+      const { AuditLogger } = await import('../logging/audit-logger.service.js');
+      AuditLogger.error('GMAIL_SYNC', 'Email Poller Loop Exception', err);
+      console.error('[Email Poller Error]', err.message);
     } finally {
       this.isPolling = false;
     }

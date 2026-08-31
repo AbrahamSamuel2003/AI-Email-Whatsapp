@@ -19,7 +19,8 @@ export interface IngestionResult {
 export class EmailIngestionPipeline {
   static async processIncomingEmail(
     email: EmailMetadata,
-    targetUserId?: string
+    targetUserId?: string,
+    isQuiet: boolean = false
   ): Promise<IngestionResult> {
     // 1. Resolve User and EmailAccount
     let user = targetUserId
@@ -48,8 +49,10 @@ export class EmailIngestionPipeline {
 
     const emailAccount = await prisma.emailAccount.findFirst({
       where: { userId: user.id, provider: 'GMAIL' },
+      orderBy: { updatedAt: 'desc' },
     }) || await prisma.emailAccount.findFirst({
       where: { userId: user.id },
+      orderBy: { updatedAt: 'desc' },
     }) || await prisma.emailAccount.create({
       data: {
         userId: user.id,
@@ -100,32 +103,47 @@ export class EmailIngestionPipeline {
       };
     }
 
-    // 4. Fast Promotional & Commercial Offer Filter (with Security/OTP Exception)
+    // 4. Fast Social Media, Promotional & Commercial Offer Filter (with Security/OTP Exception)
     const userLang: string = (user as any)?.preferredLanguage || 'ENGLISH';
-    const isSecurityCode = /otp|verification|security code|login code|2fa|one-time password|verify your account/i.test(
+    const isSecurityCode = /otp|verification|security code|login code|2fa|one-time password|verify your account|password reset/i.test(
       `${email.subject} ${email.cleanBody.slice(0, 300)}`
     );
 
     const combinedHeaders = `${email.senderEmail} ${email.senderName || ''} ${email.subject}`.toLowerCase();
-    const isCommercialOffer = !isSecurityCode && /flipkart|myntra|meesho|swiggy|zomato|newsletter|promo|offers?@|discount|cashback|marketing|digest|deal of the day|coupon|big billion|sale is live|weekly digest/i.test(
-      combinedHeaders
-    );
+    const isSocialOrPromo =
+      !isSecurityCode &&
+      /flipkart|myntra|meesho|swiggy|zomato|newsletter|promo|offers?@|discount|cashback|marketing|digest|deal of the day|coupon|big billion|sale is live|weekly digest|instagram|facebookmail|linkedin|twitter|x\.com|tiktok|reddit|pinterest|quora|medium\.com|youtube|spotify|twitch|discord|jobs matching|recruiter|upskilling track|broadcast circular|official invitation/i.test(
+        combinedHeaders
+      );
 
     let classification;
-    if (isCommercialOffer) {
+    if (isSocialOrPromo) {
       classification = {
         isImportant: false,
         notificationType: 'NONE' as const,
         confidence: 0.99,
         urgency: 'LOW' as const,
-        reasoning: 'Automated promotional offer / marketing email filtered',
+        reasoning: 'Automated social media / promotional offer / marketing email filtered',
         actionRequired: null,
         extractedCode: null,
-        summary: 'Promotional offer filtered',
+        summary: 'Promotional / social media filtered',
       };
     } else {
       const aiProvider = AIFactory.getProvider();
       classification = await aiProvider.classifyImportance(email, userLang);
+
+      // Guard: If sender is no-reply or bounce daemon, it can NEVER be actionable (user cannot reply to automated systems)
+      const isNoReply = /no-reply|noreply|donotreply|googleplay-noreply|mailer-daemon|mail delivery subsystem|postmaster|delivery status notification|notifications@/i.test(
+        `${email.senderEmail} ${email.senderName || ''} ${email.subject}`
+      );
+      if (isNoReply && classification.notificationType === 'ACTIONABLE') {
+        classification.notificationType = 'ALERT_ONLY';
+      }
+
+      // Guard: Year (2020-2030) should never be extracted as an OTP code
+      if (classification.extractedCode && /^(202[0-9]|2030)$/.test(classification.extractedCode.trim())) {
+        classification.extractedCode = null;
+      }
     }
 
     // 4. Save EmailMessage to Database
@@ -164,19 +182,25 @@ export class EmailIngestionPipeline {
       },
     });
 
-    // 5. WhatsApp Notification Pipeline
+    // 5. WhatsApp Notification Pipeline (Skipped if isQuiet is true)
     let whatsappNotified = false;
-    if (classification.isImportant && classification.notificationType !== 'NONE') {
+    if (!isQuiet && classification.isImportant && classification.notificationType !== 'NONE') {
       const whatsappProvider = WhatsAppFactory.getProvider();
       const senderDisplay = email.senderName
         ? `${email.senderName} (${email.senderEmail})`
         : email.senderEmail;
 
       if (classification.notificationType === 'ALERT_ONLY') {
-        // INFO-ONLY ALERT (OTP / Verification Code / Security Notice)
+        const titleHeader = classification.extractedCode
+          ? `*[SECURITY VERIFICATION CODE]*`
+          : `*[SECURITY / ACCOUNT ALERT]*`;
+
+        const mailboxDisplay = `📬 *Inbox:* \`${email.recipientEmail || emailAccount.emailAddress}\``;
+
         const lines = [
-          `*[SECURITY VERIFICATION CODE]*`,
+          titleHeader,
           `───────────────────────────`,
+          mailboxDisplay,
           `*From:* ${senderDisplay}`,
           `*Subject:* ${email.subject}`,
           ``,
@@ -221,6 +245,7 @@ export class EmailIngestionPipeline {
           : `*[NEW EMAIL RECEIVED]*`;
 
         const summaryHeader = isTamil ? `*மின்னஞ்சல் சுருக்கம்:*` : isHindi ? `*ईमेल सारांश:*` : `*Summary:*`;
+        const mailboxDisplay = `📬 *Inbox:* \`${email.recipientEmail || emailAccount.emailAddress}\``;
 
         const replyGuide = isTamil
           ? `*பதிலளிப்பது எப்படி:*\nகுரல் பதிவாகவோ (Voice Note) அல்லது தட்டச்சு செய்தோ உங்கள் பதிலை அனுப்பவும்:\n> _"நாளைக்கு 3 மணிக்கு ஓகே சொல்லு"_`
@@ -231,6 +256,7 @@ export class EmailIngestionPipeline {
         const notificationLines = [
           headerTitle,
           `───────────────────────────`,
+          mailboxDisplay,
           `*From:* ${senderDisplay}`,
           `*Subject:* ${email.subject}`,
           ``,
@@ -257,7 +283,27 @@ export class EmailIngestionPipeline {
         await whatsappProvider.sendTextMessage(user.whatsappNumber, notificationText);
 
         // Update session state to NOTIFIED to wait for client's informal reply
-        await SessionManager.setNotifiedState(user.whatsappNumber, thread.id, message.id);
+        await prisma.whatsappSession.upsert({
+          where: { userId: user.id },
+          create: {
+            userId: user.id,
+            whatsappNumber: user.whatsappNumber,
+            state: 'NOTIFIED',
+            activeEmailAccountId: emailAccount.id,
+            activeThreadId: thread.id,
+            activeMessageId: message.id,
+            lastClientText: null,
+          },
+          update: {
+            state: 'NOTIFIED',
+            activeEmailAccountId: emailAccount.id,
+            activeThreadId: thread.id,
+            activeMessageId: message.id,
+            generatedDraft: null,
+            lastClientText: null,
+            isSelectingMailbox: false,
+          },
+        });
         whatsappNotified = true;
 
         // Dispatch instant push notification to phone
