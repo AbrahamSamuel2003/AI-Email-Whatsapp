@@ -37,6 +37,9 @@ export class GmailSyncService {
     const messageIds = await gmailAdapter.listRecentMessages('label:INBOX', maxEmails);
     const processedIds: string[] = [];
 
+    const isInitialSync = !account.syncCursor;
+    const quietMode = isQuiet || isInitialSync;
+
     for (const msgId of messageIds) {
       try {
         // Fast DB Pre-check: Skip already ingested emails completely (zero network & zero AI usage)
@@ -51,13 +54,20 @@ export class GmailSyncService {
 
         const metadata = await gmailAdapter.fetchMessage(msgId);
         const { EmailIngestionPipeline } = await import('./ingestion-pipeline.js');
-        await EmailIngestionPipeline.processIncomingEmail(metadata, account.userId, isQuiet);
+        await EmailIngestionPipeline.processIncomingEmail(metadata, account.userId, quietMode);
         processedIds.push(msgId);
         // Sequential throttle to prevent AI concurrency bursts
         await new Promise((r) => setTimeout(r, 600));
       } catch (err: any) {
         console.error(`Failed to ingest Gmail message ${msgId}:`, err.message);
       }
+    }
+
+    if (isInitialSync) {
+      await prisma.emailAccount.update({
+        where: { id: account.id },
+        data: { syncCursor: 'INITIALIZED' },
+      });
     }
 
     return {

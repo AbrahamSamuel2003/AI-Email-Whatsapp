@@ -10,12 +10,16 @@ class MockWhatsAppSpy implements IWhatsAppProvider {
 
   async sendTextMessage(to: string, body: string): Promise<WhatsAppSendResult> {
     this.sentMessages.push({ to, body });
-    return { success: true, messageId: `msg-${Date.now()}` };
+    return { status: 'SENT', messageId: `msg-${Date.now()}`, recipient: to, timestamp: new Date() };
   }
 
   async sendInteractiveMessage(to: string, body: string, buttons: any[]): Promise<WhatsAppSendResult> {
     this.sentMessages.push({ to, body });
-    return { success: true, messageId: `msg-${Date.now()}` };
+    return { status: 'SENT', messageId: `msg-${Date.now()}`, recipient: to, timestamp: new Date() };
+  }
+
+  parseInboundWebhook(_body: any) {
+    return null;
   }
 }
 
@@ -74,7 +78,7 @@ test('Session Inactivity Timeout & CONTINUE workflow', async (t) => {
 
   // 3. User replies within 1 minute -> Draft is generated successfully
   const resWithinWindow = await WhatsAppReplyOrchestrator.handleInboundWhatsAppMessage(
-    { from: testPhone, text: 'Approved, please proceed with phase 1' },
+    { from: testPhone, text: 'Approved, please proceed with phase 1', messageId: 'msg-t-1', timestamp: Date.now() },
     spy
   );
   assert.equal(resWithinWindow.action, 'DRAFT_GENERATED');
@@ -90,7 +94,7 @@ test('Session Inactivity Timeout & CONTINUE workflow', async (t) => {
   // 5. User sends a casual text after timeout -> Should NOT draft a reply!
   spy.sentMessages = [];
   const resAfterTimeout = await WhatsAppReplyOrchestrator.handleInboundWhatsAppMessage(
-    { from: testPhone, text: 'Hey are you there?' },
+    { from: testPhone, text: 'Hey are you there?', messageId: 'msg-t-2', timestamp: Date.now() },
     spy
   );
   assert.equal(resAfterTimeout.action, 'IGNORED');
@@ -99,7 +103,7 @@ test('Session Inactivity Timeout & CONTINUE workflow', async (t) => {
   // 6. User sends "CONTINUE" -> Session is re-activated for 3 minutes!
   spy.sentMessages = [];
   const resContinue = await WhatsAppReplyOrchestrator.handleInboundWhatsAppMessage(
-    { from: testPhone, text: 'CONTINUE' },
+    { from: testPhone, text: 'CONTINUE', messageId: 'msg-t-3', timestamp: Date.now() },
     spy
   );
   assert.equal(resContinue.action, 'IGNORED');
@@ -108,7 +112,7 @@ test('Session Inactivity Timeout & CONTINUE workflow', async (t) => {
   // 7. User now sends their instruction -> Draft is generated successfully!
   spy.sentMessages = [];
   const resAfterResume = await WhatsAppReplyOrchestrator.handleInboundWhatsAppMessage(
-    { from: testPhone, text: 'Yes, full approval granted' },
+    { from: testPhone, text: 'Yes, full approval granted', messageId: 'msg-t-4', timestamp: Date.now() },
     spy
   );
   assert.equal(resAfterResume.action, 'DRAFT_GENERATED');

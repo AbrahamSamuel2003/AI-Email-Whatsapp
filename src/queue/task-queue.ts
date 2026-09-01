@@ -24,7 +24,7 @@ export class TaskQueueManager {
 
   static async init(): Promise<void> {
     if (!config.USE_REDIS_QUEUE) {
-      console.log('⚡ TaskQueue running in Direct In-Memory Mode (Zero-Config local setup)');
+      console.log('TaskQueue running in Direct In-Memory Mode (Zero-Config local setup)');
       return;
     }
 
@@ -38,7 +38,7 @@ export class TaskQueueManager {
       });
 
       redisConnection.on('error', (err: any) => {
-        console.warn('⚠️ Redis connection error, falling back to direct processing:', err.message);
+        console.warn('[Queue] Redis connection error, falling back to direct processing:', err.message);
         this.isRedisAvailable = false;
       });
 
@@ -65,10 +65,10 @@ export class TaskQueueManager {
           { connection: redisConnection }
         );
 
-        console.log('✅ BullMQ + Redis Queue successfully initialized');
+        console.log('[Queue] BullMQ + Redis Queue successfully initialized');
       }
     } catch (err: any) {
-      console.warn('⚠️ Redis not available. Running with in-memory direct execution:', err.message);
+      console.warn('[Queue] Redis not available. Running with in-memory direct execution:', err.message);
       this.isRedisAvailable = false;
     }
   }

@@ -11,7 +11,7 @@ export class ExternalWatchdog {
    */
   static start(intervalSeconds: number = 30, targetUrl?: string): void {
     const probeUrl = targetUrl || `http://127.0.0.1:${config.PORT}/health/deep`;
-    console.log(`\n📡 [External Watchdog] Health probe activated on ${probeUrl} (interval: ${intervalSeconds}s)...`);
+    console.log(`\n[External Watchdog] Health probe activated on ${probeUrl} (interval: ${intervalSeconds}s)...`);
 
     this.timer = setInterval(async () => {
       await this.probe(probeUrl);

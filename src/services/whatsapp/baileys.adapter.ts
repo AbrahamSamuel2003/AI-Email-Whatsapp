@@ -74,10 +74,27 @@ export class BaileysAdapter implements IWhatsAppProvider {
     );
   }
 
+  private reconnectTimer: NodeJS.Timeout | null = null;
+
   /**
    * Starts the single unified WASocket connection
    */
   async startSocket(printTerminalQr: boolean = true): Promise<void> {
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
+
+    if (this.sock) {
+      try {
+        this.sock.ev.removeAllListeners('connection.update');
+        this.sock.ev.removeAllListeners('creds.update');
+        this.sock.ev.removeAllListeners('messages.upsert');
+        this.sock.end(undefined);
+      } catch {}
+      this.sock = null;
+    }
+
     if (!fs.existsSync(this.baseAuthDir)) {
       fs.mkdirSync(this.baseAuthDir, { recursive: true });
     }
@@ -106,7 +123,7 @@ export class BaileysAdapter implements IWhatsAppProvider {
           this.latestQr = qr;
           if (printTerminalQr) {
             console.log('\n' + '═'.repeat(60));
-            console.log('📲 SCAN THIS QR CODE WITH WHATSAPP ON YOUR PHONE:');
+            console.log('SCAN THIS QR CODE WITH WHATSAPP ON YOUR PHONE:');
             console.log('   (WhatsApp > Settings > Linked Devices > Link a Device)');
             console.log('═'.repeat(60) + '\n');
             qrcode.generate(qr, { small: true });
@@ -118,7 +135,7 @@ export class BaileysAdapter implements IWhatsAppProvider {
           this.isReady = false;
 
           if (statusCode === DisconnectReason.loggedOut || statusCode === 401) {
-            console.log(`\n⚠️ [WhatsApp] Session logged out / unlinked. Resetting auth directory...`);
+            console.log(`\n[WhatsApp] Session logged out / unlinked. Resetting auth directory...`);
             this.connectedPhone = null;
             this.latestQr = null;
             try {
@@ -126,21 +143,34 @@ export class BaileysAdapter implements IWhatsAppProvider {
                 fs.rmSync(this.baseAuthDir, { recursive: true, force: true });
               }
             } catch {}
-            setTimeout(() => this.startSocket(true), 2000);
+            this.reconnectTimer = setTimeout(() => this.startSocket(true), 2000);
+          } else if (statusCode === 440 || statusCode === DisconnectReason.connectionReplaced) {
+            console.log(`[WhatsApp] Connection replaced by another session/process. Socket closed gracefully.`);
+            try {
+              sock.ev.removeAllListeners('connection.update');
+              sock.ev.removeAllListeners('creds.update');
+              sock.ev.removeAllListeners('messages.upsert');
+              sock.end(undefined);
+            } catch {}
           } else {
-            console.log(`[WhatsApp] Reconnecting connection (status code: ${statusCode || 'temp'})...`);
-            setTimeout(() => this.startSocket(false), 3000);
+            console.log(`[WhatsApp] Connection closed (status: ${statusCode || 'temp'}). Reconnecting in 3s...`);
+            if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+            this.reconnectTimer = setTimeout(() => this.startSocket(false), 3000);
           }
         } else if (connection === 'open') {
           this.isReady = true;
           this.latestQr = null;
+          if (this.reconnectTimer) {
+            clearTimeout(this.reconnectTimer);
+            this.reconnectTimer = null;
+          }
           const userJid = sock.user?.id || '';
           const detectedPhone = userJid.split(':')[0]?.split('@')[0] || '';
           this.connectedPhone = detectedPhone;
 
           console.log('\n' + '═'.repeat(60));
-          console.log(`✅ [WhatsApp +${detectedPhone}] Connected Successfully!`);
-          console.log(`📱 Logged in as: ${userJid.split(':')[0] || userJid}`);
+          console.log(`[WhatsApp +${detectedPhone}] Connected Successfully!`);
+          console.log(`Logged in as: ${userJid.split(':')[0] || userJid}`);
           console.log('═'.repeat(60) + '\n');
 
           // Dynamically associate connected phone number with primary user in DB
@@ -168,16 +198,6 @@ export class BaileysAdapter implements IWhatsAppProvider {
                 }
               }
             } catch (err: any) {}
-
-            // Dispatch automated onboarding greeting
-            if (!this.welcomeDispatchedSet.has(detectedPhone)) {
-              this.welcomeDispatchedSet.add(detectedPhone);
-              setTimeout(() => {
-                this.sendWelcomeGreeting(`+${detectedPhone}`).catch((e) =>
-                  console.warn('[Welcome Message Warning]', e.message)
-                );
-              }, 2000);
-            }
           }
         }
       });
@@ -232,13 +252,13 @@ export class BaileysAdapter implements IWhatsAppProvider {
 
           if (isAudio && !text) {
             try {
-              console.log(`🎙️ [WhatsApp Audio] Downloading voice note from ${rawRemoteJid}...`);
+              console.log(`[WhatsApp Audio] Downloading voice note from ${rawRemoteJid}...`);
               const audioBuffer = (await downloadMediaMessage(msg, 'buffer', {})) as Buffer;
               if (audioBuffer && audioBuffer.length > 0) {
                 const transcribed = await VoiceTranscriberService.transcribeAudio(audioBuffer);
                 if (transcribed) {
                   text = transcribed;
-                  console.log(`🎙️ [Whisper AI Transcribed]: "${text}"`);
+                  console.log(`[Whisper AI Transcribed]: "${text}"`);
                 }
               }
             } catch (err: any) {
@@ -249,13 +269,13 @@ export class BaileysAdapter implements IWhatsAppProvider {
           if (!text || !text.trim() || this.isBotOutput(text)) continue;
 
           const senderNumber = myPhone || this.cleanPhone(config.CLIENT_WHATSAPP_NUMBER);
-          console.log(`💬 [WhatsApp Inbound Self-Chat] Received: "${text}"`);
+          console.log(`[WhatsApp Inbound Self-Chat] Received: "${text}"`);
 
           const inbound: WhatsAppInboundMessage = {
-            id: msgId || `inbound-${Date.now()}`,
+            messageId: msgId || `inbound-${Date.now()}`,
             from: `+${senderNumber}`,
-            body: text.trim(),
-            timestamp: new Date(Number(msg.messageTimestamp) * 1000 || Date.now()),
+            text: text.trim(),
+            timestamp: Number(msg.messageTimestamp) * 1000 || Date.now(),
             isVoiceNote: isAudio,
           };
 
@@ -287,13 +307,49 @@ export class BaileysAdapter implements IWhatsAppProvider {
     return this.connectedPhone ? `+${this.connectedPhone}` : null;
   }
 
-  async requestPairingCodeForNumber(phoneNumber: string): Promise<string> {
+  async resetSession(clearCredentials: boolean = true): Promise<void> {
+    try {
+      console.log('[Baileys] Resetting WhatsApp session on user request...');
+      if (this.sock) {
+        try {
+          this.sock.ev.removeAllListeners('connection.update');
+          this.sock.ev.removeAllListeners('creds.update');
+          this.sock.ev.removeAllListeners('messages.upsert');
+          this.sock.end(undefined);
+        } catch (e) {}
+        this.sock = null;
+      }
+      this.isReady = false;
+      this.connectedPhone = null;
+      this.latestQr = null;
+
+      if (clearCredentials) {
+        if (fs.existsSync(this.baseAuthDir)) {
+          fs.rmSync(this.baseAuthDir, { recursive: true, force: true });
+        }
+      }
+
+      await this.startSocket(false);
+      // Wait for fresh QR code generation
+      let waited = 0;
+      while (!this.latestQr && !this.isReady && waited < 4000) {
+        await new Promise((r) => setTimeout(r, 200));
+        waited += 200;
+      }
+    } catch (err: any) {
+      console.warn('[Session Reset Warning]', err.message);
+    }
+  }
+
+  async requestPairingCodeForNumber(phoneNumber: string, forceReset: boolean = false): Promise<string> {
     const cleanNum = this.cleanPhone(phoneNumber);
     if (!cleanNum) {
       throw new Error('Please enter a valid phone number with country code');
     }
 
-    if (this.isReady) {
+    if (forceReset || (this.isReady && this.connectedPhone !== cleanNum)) {
+      await this.resetSession(true);
+    } else if (this.isReady) {
       throw new Error(`WhatsApp is already connected! (Phone: +${this.connectedPhone || cleanNum})`);
     }
 
@@ -309,76 +365,122 @@ export class BaileysAdapter implements IWhatsAppProvider {
     // Call Baileys requestPairingCode on live socket
     const rawCode = await this.sock.requestPairingCode(cleanNum);
     const formatted = rawCode?.match(/.{1,4}/g)?.join('-') || rawCode;
-    console.log(`\n🔑 [WhatsApp Pairing Code] Generated for +${cleanNum}: ${formatted}\n`);
+    console.log(`\n[WhatsApp Pairing Code] Generated for +${cleanNum}: ${formatted}\n`);
     return formatted;
   }
 
   async sendWelcomeGreeting(phoneNumber: string): Promise<void> {
-    const cleanNum = this.cleanPhone(phoneNumber) || this.connectedPhone;
-    const formattedPhone = `+${cleanNum}`;
+    const cleanNum = this.cleanPhone(phoneNumber) || this.connectedPhone || (config.CLIENT_WHATSAPP_NUMBER ? this.cleanPhone(config.CLIENT_WHATSAPP_NUMBER) : '') || '';
+    const formattedPhone = cleanNum ? (cleanNum.startsWith('+') ? cleanNum : `+${cleanNum}`) : (phoneNumber.startsWith('+') ? phoneNumber : `+${phoneNumber}`);
 
     const user = (await prisma.user.findFirst({
       where: {
         OR: [
           { whatsappNumber: formattedPhone },
-          { whatsappNumber: cleanNum },
+          ...(cleanNum ? [{ whatsappNumber: cleanNum }] : []),
         ],
       },
-      include: { emailAccounts: { orderBy: { updatedAt: 'desc' } } },
+      include: { emailAccounts: { orderBy: { createdAt: 'asc' } } },
     })) || (await prisma.user.findFirst({
-      include: { emailAccounts: { orderBy: { updatedAt: 'desc' } } },
-      orderBy: { updatedAt: 'desc' },
+      include: { emailAccounts: { orderBy: { createdAt: 'asc' } } },
+      orderBy: { createdAt: 'asc' },
     }));
 
-    const allAccounts = user?.emailAccounts || [];
-    const clientName = user?.name || 'Executive Client';
+    const session = user
+      ? await prisma.whatsappSession.findFirst({
+          where: { userId: user.id },
+        })
+      : null;
 
-    const numbersEmoji = ['1️⃣', '2️⃣', '3️⃣', '4️⃣', '5️⃣', '6️⃣', '7️⃣', '8️⃣', '9️⃣', '🔟'];
+    const allAccounts: any[] = (user as any)?.emailAccounts || [];
+    const clientName = user?.name || 'Client';
+    const isStandardMode = (user as any)?.mode === 'STANDARD';
+
+    const activeAccObj = (session?.activeEmailAccountId
+      ? allAccounts.find((a: any) => a.id === session.activeEmailAccountId)
+      : null) || allAccounts[0];
+
+    const activeEmailStr = activeAccObj?.emailAddress || 'Connected Mailbox';
 
     let emailSection = '';
-    if (allAccounts.length > 1) {
-      const accountLines = allAccounts.map((acc, idx) => `${numbersEmoji[idx] || `${idx + 1}.`} ${acc.emailAddress}`);
+    let instructionsSection = '';
+
+    if (isStandardMode) {
       emailSection = [
-        `📧 *Connected Mailboxes (${allAccounts.length}):*`,
-        ...accountLines,
-        ``,
-        `👉 *Reply with 1, 2, or 3* to select which mailbox to open and monitor.`,
+        `*Mode:* Standard (Minimalist)`,
+        `*Active Mailbox:* \`${activeEmailStr}\``,
       ].join('\n');
 
-      if (user) {
-        await prisma.whatsappSession.upsert({
-          where: { userId: user.id },
-          create: {
-            userId: user.id,
-            whatsappNumber: formattedPhone,
-            state: 'IDLE',
-            isSelectingMailbox: true,
-            activeEmailAccountId: allAccounts[0].id,
-          },
-          update: {
-            isSelectingMailbox: true,
-            activeEmailAccountId: allAccounts[0].id,
-          },
-        });
-      }
+      instructionsSection = [
+        `*How it works:*`,
+        `• When important emails arrive, you will receive notifications here automatically.`,
+        `• Reply via voice note or text in any language to draft professional responses.`,
+        `• One-touch SEND | EDIT | CANCEL.`,
+        `• Send *SWITCH* to change your active mailbox.`,
+        `• Send *SUPPORT* for direct contact channels.`,
+      ].join('\n');
     } else {
-      const singleEmail = allAccounts[0]?.emailAddress || 'Connected Mailbox';
-      emailSection = `📧 *Connected Mail:* \`${singleEmail}\``;
+      if (allAccounts.length > 1) {
+        const accountLines = (allAccounts as any[]).map((acc: any, idx: number) => {
+          const isCur = acc.id === activeAccObj?.id ? ' [Active]' : '';
+          return `${idx + 1}. ${acc.emailAddress}${isCur}`;
+        });
+        emailSection = [
+          `*Mode:* Executive Pro`,
+          `*Connected Mailboxes (${allAccounts.length}):*`,
+          ...accountLines,
+          ``,
+          `*Reply with 1, 2, or 3* to select which mailbox to open and monitor.`,
+        ].join('\n');
+
+        if (user) {
+          await prisma.whatsappSession.upsert({
+            where: { userId: user.id },
+            create: {
+              userId: user.id,
+              whatsappNumber: formattedPhone,
+              state: 'IDLE',
+              isSelectingMailbox: true,
+              activeEmailAccountId: activeAccObj?.id || allAccounts[0].id,
+            },
+            update: {
+              isSelectingMailbox: true,
+              activeEmailAccountId: activeAccObj?.id || allAccounts[0].id,
+            },
+          });
+        }
+      } else {
+        emailSection = [
+          `*Mode:* Executive Pro`,
+          `*Connected Mail:* \`${activeEmailStr}\``,
+        ].join('\n');
+      }
+
+      instructionsSection = [
+        `*Commands & Instructions:*`,
+        `• Send *NEW MAIL* (or voice note) to compose and send a new email.`,
+        `• Send *CHECK MAIL* (or voice note) to scan your inbox.`,
+        `• Send *SWITCH* to change your active mailbox.`,
+        `• When an email arrives, reply via voice note or text in any language.`,
+        `• Reply *SEND* to approve and dispatch in Corporate English.`,
+      ].join('\n');
     }
 
     const welcomeLines = [
-      `🤖 *SS40 AI Email Assistant Activated!*`,
+      `*[SS40 AI EMAIL ASSISTANT ACTIVATED]*`,
       `───────────────────────────`,
       `Hi *${clientName}*,`,
       ``,
-      `Your AI Executive Assistant is active and monitoring your mailbox.`,
+      `Your AI Assistant is active and monitoring your mailbox.`,
       ``,
       emailSection,
-      `📱 *Connected WhatsApp:* \`${formattedPhone}\``,
+      `*Connected WhatsApp:* \`${formattedPhone}\``,
       `───────────────────────────`,
-      `🏢 *Company:* SS40 Network`,
-      `💬 *Support:* ${config.ADMIN_SUPPORT_EMAIL}`,
-      `🌐 *Portal:* ${config.SS40_PORTAL_URL}`,
+      instructionsSection,
+      `───────────────────────────`,
+      `*Company:* SS40 Network`,
+      `*Support:* ${config.ADMIN_SUPPORT_EMAIL}`,
+      `*Portal:* ${config.SS40_PORTAL_URL}`,
       `───────────────────────────`,
     ];
 
@@ -411,7 +513,7 @@ export class BaileysAdapter implements IWhatsAppProvider {
     }
 
     const jid = `${cleanNumber}@s.whatsapp.net`;
-    console.log(`📤 [WhatsApp Outbound] Sending message to ${jid}...`);
+    console.log(`[WhatsApp Outbound] Sending message to ${jid}...`);
 
     const sent = await this.sock.sendMessage(jid, { text: body });
     const messageId = sent?.key?.id || `baileys-${Date.now()}`;
@@ -436,10 +538,10 @@ export class BaileysAdapter implements IWhatsAppProvider {
   parseInboundWebhook(body: any): WhatsAppInboundMessage | null {
     if (body?.from && (body?.text || body?.body)) {
       return {
-        id: body.id || `baileys-in-${Date.now()}`,
+        messageId: body.messageId || body.id || `baileys-in-${Date.now()}`,
         from: body.from,
-        body: (body.text || body.body || '').trim(),
-        timestamp: new Date(body.timestamp || Date.now()),
+        text: (body.text || body.body || '').trim(),
+        timestamp: Number(body.timestamp) || Date.now(),
         isVoiceNote: Boolean(body.isVoiceNote),
       };
     }

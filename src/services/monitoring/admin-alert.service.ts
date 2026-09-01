@@ -39,7 +39,7 @@ export class AdminAlertService {
     }
 
     console.log(`\n======================================================`);
-    console.log(`🚨 [SS40 ADMIN ALERT DISPATCHED]`);
+    console.log(`[SS40 ADMIN ALERT DISPATCHED]`);
     console.log(`To:      ${config.ADMIN_SUPPORT_EMAIL}`);
     console.log(`Subject: ${subject}`);
     console.log(`------------------------------------------------------`);
@@ -103,7 +103,7 @@ export class AdminAlertService {
     await this.dispatchAdminEmail(adminSubject, adminBody);
 
     // B. Format Client Fallback Email
-    console.log(`\n📧 [Client Fallback Email Sent to ${clientEmail}]`);
+    console.log(`\n[Client Fallback Email Sent to ${clientEmail}]`);
     console.log(`Subject: [IMPORTANT] Action Required: Reconnect Your SS40 AI Assistant`);
     console.log(`Dear ${clientName},\nYour WhatsApp Assistant session was recently disconnected.`);
     console.log(`Click here to re-link: ${config.SS40_PORTAL_URL}/relink?phone=${encodeURIComponent(whatsappNumber)}`);

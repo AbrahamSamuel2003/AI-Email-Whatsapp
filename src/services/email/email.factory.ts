@@ -8,7 +8,7 @@ export class EmailFactory {
 
   static getProvider(accessToken?: string, refreshToken?: string): IEmailProvider {
     if (!this.instance) {
-      if (config.EMAIL_PROVIDER === 'gmail' && config.GOOGLE_CLIENT_ID) {
+      if (config.EMAIL_PROVIDER === 'gmail' && config.GOOGLE_CLIENT_ID && accessToken) {
         this.instance = new GmailAdapter(accessToken, refreshToken);
       } else {
         this.instance = new MockGmailAdapter();

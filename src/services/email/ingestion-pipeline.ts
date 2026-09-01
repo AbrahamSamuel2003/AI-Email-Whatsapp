@@ -47,7 +47,12 @@ export class EmailIngestionPipeline {
       });
     }
 
-    const emailAccount = await prisma.emailAccount.findFirst({
+    const emailAccount = (email.recipientEmail
+      ? await prisma.emailAccount.findFirst({
+          where: { userId: user.id, emailAddress: email.recipientEmail },
+          orderBy: { updatedAt: 'desc' },
+        })
+      : null) || await prisma.emailAccount.findFirst({
       where: { userId: user.id, provider: 'GMAIL' },
       orderBy: { updatedAt: 'desc' },
     }) || await prisma.emailAccount.findFirst({
@@ -142,9 +147,13 @@ export class EmailIngestionPipeline {
 
       // Guard: Year (2020-2030) should never be extracted as an OTP code
       if (classification.extractedCode && /^(202[0-9]|2030)$/.test(classification.extractedCode.trim())) {
-        classification.extractedCode = null;
+        classification.extractedCode = undefined;
       }
     }
+
+    // Ensure only ACTIONABLE emails have actionRequired populated (ALERT_ONLY emails must have null actionRequired so they never enter the reply queue)
+    const isActionable = classification.isImportant && classification.notificationType === 'ACTIONABLE';
+    const actionRequiredValue = isActionable ? (classification.actionRequired || 'Reply requested') : null;
 
     // 4. Save EmailMessage to Database
     const message = await prisma.emailMessage.upsert({
@@ -159,7 +168,7 @@ export class EmailIngestionPipeline {
         importanceScore: classification.confidence,
         importanceReason: classification.reasoning,
         urgency: classification.urgency,
-        actionRequired: classification.actionRequired,
+        actionRequired: actionRequiredValue,
       },
       create: {
         threadId: thread.id,
@@ -178,24 +187,37 @@ export class EmailIngestionPipeline {
         importanceScore: classification.confidence,
         importanceReason: classification.reasoning,
         urgency: classification.urgency,
-        actionRequired: classification.actionRequired,
+        actionRequired: actionRequiredValue,
       },
     });
 
-    // 5. WhatsApp Notification Pipeline (Skipped if isQuiet is true)
+    // Ingestion Guard: Never notify WhatsApp for historical emails received prior to account connection
+    const emailReceivedTime = email.receivedAt ? new Date(email.receivedAt).getTime() : Date.now();
+    const isHistorical = emailAccount?.createdAt && !emailAccount.syncCursor
+      ? emailReceivedTime < emailAccount.createdAt.getTime() - 60000
+      : false;
+
+    // 5. WhatsApp Notification Pipeline (Skipped if isQuiet or historical)
     let whatsappNotified = false;
-    if (!isQuiet && classification.isImportant && classification.notificationType !== 'NONE') {
+    if (!isQuiet && !isHistorical && classification.isImportant && classification.notificationType !== 'NONE') {
       const whatsappProvider = WhatsAppFactory.getProvider();
       const senderDisplay = email.senderName
         ? `${email.senderName} (${email.senderEmail})`
         : email.senderEmail;
+
+      // Clean raw recipient email (strip quotes and angle brackets)
+      const rawRecipient = email.recipientEmail || emailAccount.emailAddress || '';
+      const emailMatch = rawRecipient.match(/<([^>]+)>/);
+      const cleanInbox = emailMatch && emailMatch[1]
+        ? emailMatch[1].replace(/["']/g, '').trim()
+        : rawRecipient.replace(/["']/g, '').trim();
 
       if (classification.notificationType === 'ALERT_ONLY') {
         const titleHeader = classification.extractedCode
           ? `*[SECURITY VERIFICATION CODE]*`
           : `*[SECURITY / ACCOUNT ALERT]*`;
 
-        const mailboxDisplay = `📬 *Inbox:* \`${email.recipientEmail || emailAccount.emailAddress}\``;
+        const mailboxDisplay = `*Inbox:* ${cleanInbox}`;
 
         const lines = [
           titleHeader,
@@ -222,7 +244,8 @@ export class EmailIngestionPipeline {
         await whatsappProvider.sendTextMessage(user.whatsappNumber, lines.join('\n'));
         whatsappNotified = true;
 
-        // Dispatch instant push notification to phone
+        // Dispatch instant push notification to user's personal ntfy topic
+        const userTopic = PhoneAlertService.getTopicForUser(user);
         await PhoneAlertService.sendAlert({
           title: classification.extractedCode
             ? `[SECURITY CODE] ${classification.extractedCode}`
@@ -231,7 +254,7 @@ export class EmailIngestionPipeline {
             ? `Code: ${classification.extractedCode}\nFrom: ${senderDisplay}\nSubject: ${email.subject}`
             : `From: ${senderDisplay}\nSubject: ${email.subject}\n\n${(classification.summary || email.cleanBody).trim().slice(0, 150)}`,
           priority: 'urgent',
-        });
+        }, userTopic);
         // NOTE: Session state stays IDLE — no draft/reply session created!
       } else {
         // ACTIONABLE EMAIL (Requires Reply)
@@ -245,7 +268,7 @@ export class EmailIngestionPipeline {
           : `*[NEW EMAIL RECEIVED]*`;
 
         const summaryHeader = isTamil ? `*மின்னஞ்சல் சுருக்கம்:*` : isHindi ? `*ईमेल सारांश:*` : `*Summary:*`;
-        const mailboxDisplay = `📬 *Inbox:* \`${email.recipientEmail || emailAccount.emailAddress}\``;
+        const mailboxDisplay = `*Inbox:* ${cleanInbox}`;
 
         const replyGuide = isTamil
           ? `*பதிலளிப்பது எப்படி:*\nகுரல் பதிவாகவோ (Voice Note) அல்லது தட்டச்சு செய்தோ உங்கள் பதிலை அனுப்பவும்:\n> _"நாளைக்கு 3 மணிக்கு ஓகே சொல்லு"_`
@@ -306,12 +329,13 @@ export class EmailIngestionPipeline {
         });
         whatsappNotified = true;
 
-        // Dispatch instant push notification to phone
+        // Dispatch instant push notification to user's personal ntfy topic
+        const userTopic = PhoneAlertService.getTopicForUser(user);
         await PhoneAlertService.sendAlert({
           title: `[EMAIL] ${email.subject}`,
           message: `From: ${senderDisplay}\n\n${(classification.summary || email.cleanBody).trim().slice(0, 140)}...\n\nOpen WhatsApp to reply.`,
           priority: 'high',
-        });
+        }, userTopic);
       }
     }
 

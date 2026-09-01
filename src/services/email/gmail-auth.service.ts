@@ -81,30 +81,76 @@ export class GmailAuthService {
     const encryptedRefreshToken = tokens.refresh_token ? encryptToken(tokens.refresh_token) : null;
     const tokenExpiry = tokens.expiry_date ? new Date(tokens.expiry_date) : null;
 
-    const existingUser = await prisma.user.findFirst({
+    const cleanPhone = (whatsappNumber || '').replace(/\D/g, '');
+    const formattedPhone = cleanPhone
+      ? (whatsappNumber.startsWith('+') ? whatsappNumber : `+${cleanPhone}`)
+      : (config.CLIENT_WHATSAPP_NUMBER || '+1234567890');
+
+    // 1. Search for existing user by mobile number first
+    let user = cleanPhone ? await prisma.user.findFirst({
       where: {
         OR: [
-          { whatsappNumber },
-          { email: emailAddress },
+          { whatsappNumber: formattedPhone },
+          { whatsappNumber: cleanPhone },
+          ...(cleanPhone.length >= 10 ? [{ whatsappNumber: { endsWith: cleanPhone.slice(-10) } }] : []),
         ],
       },
-    });
+    }) : null;
 
-    const finalName = customName || existingUser?.name || displayName || 'Executive Client';
+    // 2. If not found by phone, search by emailAddress
+    if (!user && emailAddress) {
+      user = await prisma.user.findFirst({
+        where: { email: emailAddress },
+      });
+    }
 
-    // Find or create User
-    const user = await prisma.user.upsert({
-      where: { whatsappNumber },
-      update: {
-        name: finalName,
-        email: emailAddress,
-      },
-      create: {
-        name: finalName,
-        email: emailAddress,
-        whatsappNumber,
-      },
-    });
+    const finalName = customName || user?.name || displayName || 'Executive Client';
+
+    if (user) {
+      // User exists. Update name and phone if needed, preventing unique collisions.
+      const emailConflict = await prisma.user.findFirst({
+        where: {
+          email: emailAddress,
+          id: { not: user.id },
+        },
+      });
+
+      const phoneConflict = cleanPhone ? await prisma.user.findFirst({
+        where: {
+          whatsappNumber: formattedPhone,
+          id: { not: user.id },
+        },
+      }) : null;
+
+      user = await prisma.user.update({
+        where: { id: user.id },
+        data: {
+          name: finalName,
+          ...(emailConflict ? {} : { email: emailAddress }),
+          ...(phoneConflict ? {} : { whatsappNumber: formattedPhone }),
+        },
+      });
+    } else {
+      // User does not exist. Create new User with guaranteed unique email and unique phone.
+      const existingWithEmail = await prisma.user.findUnique({ where: { email: emailAddress } });
+      const uniqueEmail = existingWithEmail
+        ? `${cleanPhone || Date.now()}-${Math.random().toString(36).slice(2, 6)}@connect.ss40network.com`
+        : emailAddress;
+
+      const existingWithPhone = await prisma.user.findUnique({ where: { whatsappNumber: formattedPhone } });
+      const uniquePhone = existingWithPhone
+        ? `${formattedPhone}-${Date.now().toString().slice(-4)}`
+        : formattedPhone;
+
+      user = await prisma.user.create({
+        data: {
+          name: finalName,
+          email: uniqueEmail,
+          whatsappNumber: uniquePhone,
+          mode: 'STANDARD',
+        } as any,
+      });
+    }
 
     // Upsert EmailAccount
     const emailAccount = await prisma.emailAccount.upsert({

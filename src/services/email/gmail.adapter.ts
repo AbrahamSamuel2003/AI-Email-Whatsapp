@@ -163,14 +163,68 @@ export class GmailAdapter implements IEmailProvider {
       requestBody.threadId = payload.threadId;
     }
 
-    const res = await this.gmail.users.messages.send({
-      userId: 'me',
-      requestBody,
-    });
+    let res;
+    try {
+      res = await this.gmail.users.messages.send({
+        userId: 'me',
+        requestBody,
+      });
+    } catch (err: any) {
+      // If Google throws 404 or "Requested entity was not found" due to threadId mismatch,
+      // retry sending WITHOUT the strict threadId parameter so the email is delivered reliably!
+      if (requestBody.threadId && (err.message?.includes('not found') || err.code === 404 || err.status === 404)) {
+        console.warn(`[Gmail Send Fallback] threadId ${requestBody.threadId} not found on this account. Retrying without threadId parameter...`);
+        delete requestBody.threadId;
+        res = await this.gmail.users.messages.send({
+          userId: 'me',
+          requestBody,
+        });
+      } else {
+        throw err;
+      }
+    }
 
     return {
       externalMessageId: res.data.id || `gmail-${Date.now()}`,
       threadId: res.data.threadId || payload.threadId,
+      sentAt: new Date(),
+      status: 'SENT',
+    };
+  }
+
+  async sendNewEmail(payload: import('../../core/types.js').OutboundNewEmailPayload): Promise<SendResult> {
+    const utf8Subject = `=?utf-8?B?${Buffer.from(payload.subject).toString('base64')}?=`;
+
+    const messageParts = [
+      `To: ${payload.toEmail}`,
+      `Subject: ${utf8Subject}`,
+      `MIME-Version: 1.0`,
+      `Content-Type: text/plain; charset=utf-8`,
+      `Content-Transfer-Encoding: 7bit`,
+    ];
+
+    if (payload.fromEmail) {
+      messageParts.unshift(`From: ${payload.fromEmail}`);
+    }
+
+    messageParts.push('', payload.body);
+    const rawMessage = messageParts.join('\r\n');
+    const encodedMessage = Buffer.from(rawMessage)
+      .toString('base64')
+      .replace(/\+/g, '-')
+      .replace(/\//g, '_')
+      .replace(/=+$/, '');
+
+    const res = await this.gmail.users.messages.send({
+      userId: 'me',
+      requestBody: {
+        raw: encodedMessage,
+      },
+    });
+
+    return {
+      externalMessageId: res.data.id || `gmail-${Date.now()}`,
+      threadId: res.data.threadId || `thread-${res.data.id || Date.now()}`,
       sentAt: new Date(),
       status: 'SENT',
     };

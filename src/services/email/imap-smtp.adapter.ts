@@ -159,6 +159,30 @@ export class ImapSmtpAdapter implements IEmailProvider {
   }
 
   /**
+   * Dispatches outbound new standalone email via SMTP
+   */
+  async sendNewEmail(payload: import('../../core/types.js').OutboundNewEmailPayload): Promise<SendResult> {
+    const transporter = this.getSmtpTransporter();
+
+    const senderEmail = payload.fromEmail || this.config.emailAddress;
+    const mailOptions: nodemailer.SendMailOptions = {
+      from: `"${senderEmail.split('@')[0]}" <${senderEmail}>`,
+      to: payload.toEmail,
+      subject: payload.subject,
+      text: payload.body,
+    };
+
+    const info = await transporter.sendMail(mailOptions);
+
+    return {
+      externalMessageId: info.messageId || `smtp-${Date.now()}`,
+      threadId: `thread-${info.messageId || Date.now()}`,
+      sentAt: new Date(),
+      status: 'SENT',
+    };
+  }
+
+  /**
    * Handshake tester to verify IMAP & SMTP credentials
    */
   static async verifyConnection(config: ImapSmtpConfig): Promise<{ imap: boolean; smtp: boolean; error?: string }> {

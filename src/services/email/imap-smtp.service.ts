@@ -234,13 +234,23 @@ export class ImapSmtpService {
     const recentEmails = await adapter.fetchRecentEmails(maxEmails);
     const processedEmails = [];
 
+    const isInitialSync = !account.syncCursor;
+    const quietMode = isQuiet || isInitialSync;
+
     for (const emailMeta of recentEmails) {
       const result = await EmailIngestionPipeline.processIncomingEmail(
         emailMeta,
         account.userId,
-        isQuiet
+        quietMode
       );
       processedEmails.push(result);
+    }
+
+    if (isInitialSync) {
+      await prisma.emailAccount.update({
+        where: { id: account.id },
+        data: { syncCursor: new Date().toISOString() },
+      });
     }
 
     return {

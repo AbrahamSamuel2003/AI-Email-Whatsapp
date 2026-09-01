@@ -15,6 +15,8 @@ model User {
   email             String            @unique
   whatsappNumber    String            @unique
   preferredLanguage String            @default("ENGLISH") // "ENGLISH" | "TAMIL" | "HINDI"
+  mode              String            @default("ADVANCED") // "STANDARD" | "ADVANCED"
+  ntfyTopic         String?
   createdAt         DateTime          @default(now())
   updatedAt         DateTime          @updatedAt
   emailAccounts     EmailAccount[]
@@ -91,11 +93,13 @@ model WhatsappSession {
   id                    String            @id @default(uuid())
   userId                String            @unique
   whatsappNumber        String            @unique
-  state                 String            @default("IDLE") // "IDLE" | "NOTIFIED" | "PREVIEW_GENERATED" | "CONFIRMED_SENT"
+  state                 String            @default("IDLE") // "IDLE" | "NOTIFIED" | "PREVIEW_GENERATED" | "CONFIRMED_SENT" | "AWAITING_RECIPIENT" | "AWAITING_COMPOSE_MESSAGE" | "COMPOSE_MANUAL_EDIT"
   activeEmailAccountId  String?
   isSelectingMailbox    Boolean           @default(false)
   activeThreadId        String?
   activeMessageId       String?
+  composeRecipient      String?
+  composeSubject        String?
   generatedDraft        String?
   lastClientText        String?
   updatedAt             DateTime          @updatedAt
@@ -106,7 +110,7 @@ model WhatsappSession {
 model OutboundEmail {
   id                  String        @id @default(uuid())
   emailAccountId      String
-  threadId            String
+  threadId            String?
   inReplyToMessageId  String?
   toEmail             String
   subject             String
@@ -116,5 +120,5 @@ model OutboundEmail {
   sentAt              DateTime?
   createdAt           DateTime      @default(now())
   emailAccount        EmailAccount  @relation(fields: [emailAccountId], references: [id], onDelete: Cascade)
-  thread              EmailThread   @relation(fields: [threadId], references: [id], onDelete: Cascade)
+  thread              EmailThread?  @relation(fields: [threadId], references: [id], onDelete: Cascade)
 }

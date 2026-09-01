@@ -169,8 +169,11 @@ export class SessionManager {
         state: 'IDLE',
         activeThreadId: null,
         activeMessageId: null,
+        composeRecipient: null,
+        composeSubject: null,
         generatedDraft: null,
         lastClientText: null,
+        isSelectingMailbox: false,
       },
     });
   }

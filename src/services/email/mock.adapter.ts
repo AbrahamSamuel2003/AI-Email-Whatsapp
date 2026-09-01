@@ -45,6 +45,22 @@ export class MockGmailAdapter implements IEmailProvider {
     };
   }
 
+  async sendNewEmail(payload: import('../../core/types.js').OutboundNewEmailPayload): Promise<SendResult> {
+    this.sentReplies.push({
+      toEmail: payload.toEmail,
+      subject: payload.subject,
+      body: payload.body,
+      threadId: `thread-mock-${Date.now()}`,
+    });
+    const sentId = `sent-msg-${Date.now()}`;
+    return {
+      externalMessageId: sentId,
+      threadId: `thread-mock-${Date.now()}`,
+      sentAt: new Date(),
+      status: 'SENT',
+    };
+  }
+
   async getThreadMessages(threadId: string): Promise<EmailMetadata[]> {
     return Array.from(this.messages.values()).filter((m) => m.externalThreadId === threadId);
   }

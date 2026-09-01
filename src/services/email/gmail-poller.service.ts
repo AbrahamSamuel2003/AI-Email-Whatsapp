@@ -13,7 +13,7 @@ export class GmailPollerService {
     }
 
     const intervalMs = intervalSeconds * 1000;
-    console.log(`\n🔄 [Gmail Poller] Automated real-time polling activated (checking every ${intervalSeconds}s)...`);
+    console.log(`\n[Gmail Poller] Automated real-time polling activated (checking every ${intervalSeconds}s)...`);
 
     // Run first sync immediately after 2 seconds
     setTimeout(() => {
@@ -29,7 +29,7 @@ export class GmailPollerService {
     if (this.timer) {
       clearInterval(this.timer);
       this.timer = null;
-      console.log('🛑 [Gmail Poller] Stopped.');
+      console.log('[Gmail Poller] Stopped.');
     }
   }
 
@@ -53,7 +53,7 @@ export class GmailPollerService {
         try {
           const res = await GmailSyncService.syncRecentEmails(account.id, 5);
           if (res.syncedCount > 0) {
-            console.log(`⚡ [Gmail Poller] Auto-detected and processed ${res.syncedCount} new email(s) for ${account.emailAddress}!`);
+            console.log(`[Gmail Poller] Auto-detected and processed ${res.syncedCount} new email(s) for ${account.emailAddress}!`);
           }
         } catch (err: any) {
           const { AuditLogger } = await import('../logging/audit-logger.service.js');
@@ -62,7 +62,7 @@ export class GmailPollerService {
           });
 
           if (err.message?.includes('Insufficient Permission')) {
-            console.warn(`⚠️ [Gmail Poller] ${account.emailAddress} is missing Gmail OAuth permissions. Re-link at http://localhost:3005/?step=2 and check permission boxes.`);
+            console.warn(`[Gmail Poller] ${account.emailAddress} is missing Gmail OAuth permissions. Re-link at http://localhost:3005/?step=2 and check permission boxes.`);
           } else if (!err.message?.includes('invalid_grant')) {
             console.warn(`[Gmail Poller] Sync error for ${account.emailAddress}:`, err.message);
           }
@@ -82,7 +82,7 @@ export class GmailPollerService {
           const { ImapSmtpService } = await import('./imap-smtp.service.js');
           const res = await ImapSmtpService.syncRecentEmails(account.id, 5);
           if (res.syncedCount > 0) {
-            console.log(`⚡ [IMAP Poller] Auto-detected and processed ${res.syncedCount} new email(s) for ${account.emailAddress}!`);
+            console.log(`[IMAP Poller] Auto-detected and processed ${res.syncedCount} new email(s) for ${account.emailAddress}!`);
           }
         } catch (err: any) {
           const { AuditLogger } = await import('../logging/audit-logger.service.js');

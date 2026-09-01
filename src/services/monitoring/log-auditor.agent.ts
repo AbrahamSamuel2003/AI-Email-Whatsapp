@@ -127,23 +127,23 @@ export class LogAuditorAgent {
     const lines: string[] = [];
 
     lines.push('═'.repeat(65));
-    lines.push(`🔍 SS40 NETWORK: PRODUCTION AUDIT & ERROR DIAGNOSTIC REPORT`);
+    lines.push(`SS40 NETWORK: PRODUCTION AUDIT & ERROR DIAGNOSTIC REPORT`);
     lines.push(`Overall Status:   [${report.status}]`);
     lines.push(`Uptime:           ${Math.floor(report.uptimeSeconds / 60)}m ${report.uptimeSeconds % 60}s`);
     lines.push(`Timestamp:        ${report.timestamp.toISOString()}`);
     lines.push('─'.repeat(65));
-    lines.push(`📡 COMPONENT HEALTH:`);
+    lines.push(`COMPONENT HEALTH:`);
     lines.push(`  • Database:     [${report.components.database.status}] (Latency: ${report.components.database.latencyMs}ms)`);
     lines.push(`  • WhatsApp:     [${report.components.whatsapp.status}] (${report.components.whatsapp.provider} -> ${report.components.whatsapp.clientNumber})`);
     lines.push(`  • Gmail Engine: [${report.components.gmail.status}] (${report.components.gmail.linkedAccountsCount} accounts active)`);
     lines.push(`  • AI Engine:    [${report.components.ai.status}] (${report.components.ai.provider}: ${report.components.ai.modelName})`);
     lines.push('─'.repeat(65));
-    lines.push(`📊 LIVE METRICS:`);
+    lines.push(`LIVE METRICS:`);
     lines.push(`  • Ingested Emails:  ${report.metrics.processedEmailsToday}`);
     lines.push(`  • Active Sessions:  ${report.metrics.activeSessions}`);
     lines.push(`  • Incidents (24h):  ${report.metrics.recentIncidentsCount}`);
     lines.push('─'.repeat(65));
-    lines.push(`🚨 ERROR & LOG AUDIT TRAIL (${errorScan.totalErrors} recent warning/error events):`);
+    lines.push(`ERROR & LOG AUDIT TRAIL (${errorScan.totalErrors} recent warning/error events):`);
     if (errorScan.errors.length === 0) {
       lines.push(`  • Zero active errors. Terminal and background services clean.`);
     } else {
@@ -157,7 +157,7 @@ export class LogAuditorAgent {
       });
     }
     lines.push('─'.repeat(65));
-    lines.push(`💡 DIAGNOSTIC RECOMMENDATIONS:`);
+    lines.push(`DIAGNOSTIC RECOMMENDATIONS:`);
     for (const rec of report.recommendations) {
       lines.push(`  - ${rec}`);
     }

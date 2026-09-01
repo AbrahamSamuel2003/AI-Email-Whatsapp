@@ -1,5 +1,6 @@
 import { IAIProvider } from './ai.interface.js';
 import { AIImportanceResult, AIReplyContext, AIReplyResult, EmailMetadata, NotificationType } from '../../core/types.js';
+import { removeEmojis } from '../../core/text-sanitizer.js';
 
 export class MockAIAdapter implements IAIProvider {
   async classifyImportance(email: EmailMetadata, _preferredLanguage?: string): Promise<AIImportanceResult> {
@@ -182,9 +183,44 @@ export class MockAIAdapter implements IAIProvider {
     }
 
     return {
-      subject: `Re: ${context.subject.replace(/^Re:\s*/i, '')}`,
-      replyBody: bodyText,
-      closing: `Regards,\n${clientName}`,
+      subject: removeEmojis(`Re: ${context.subject.replace(/^Re:\s*/i, '')}`),
+      replyBody: removeEmojis(bodyText),
+      closing: removeEmojis(`Regards,\n${clientName}`),
+    };
+  }
+
+  async generateNewEmailDraft(context: import('../../core/types.js').NewEmailComposeContext): Promise<import('../../core/types.js').NewEmailComposeResult> {
+    const note = context.clientInstruction.trim();
+    const recipientUser = context.recipientEmail.split('@')[0] || 'Sir/Madam';
+    const cleanRecipient = recipientUser.charAt(0).toUpperCase() + recipientUser.slice(1);
+    const clientName = context.clientName || 'Samuel';
+
+    // 1. Dynamic, context-aware Subject line generation
+    let subject = '';
+    if (/intern|selected|selection|offer|hiring|joining/i.test(note)) {
+      subject = 'Internship Selection & Joining Details - SS40 Network';
+    } else if (/meeting|schedule|connect|zoom|call/i.test(note)) {
+      subject = 'Meeting Request & Discussion';
+    } else if (/quote|pricing|cost|invoice|estimate/i.test(note)) {
+      subject = 'Quotation & Pricing Information';
+    } else if (/urgent|asap|important/i.test(note)) {
+      subject = 'Important Update / Follow-up';
+    } else if (/project|proposal|status|report/i.test(note)) {
+      subject = 'Project Proposal & Status Update';
+    } else {
+      const words = note.replace(/[^\w\s]/g, '').split(/\s+/).slice(0, 6).join(' ');
+      subject = words.charAt(0).toUpperCase() + words.slice(1);
+    }
+
+    // 2. Natural, professional message formatting without rigid boilerplate templates
+    let cleanMessage = note.charAt(0).toUpperCase() + note.slice(1);
+    if (!/[.?!]$/.test(cleanMessage)) cleanMessage += '.';
+
+    const body = `Dear ${cleanRecipient},\n\n${cleanMessage}\n\nBest regards,\n${clientName}`;
+
+    return {
+      subject: removeEmojis(subject),
+      body: removeEmojis(body),
     };
   }
 }

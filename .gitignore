@@ -6,7 +6,6 @@ node_modules/
 .env.local
 .env.*.local
 
-# WhatsApp Baileys Auth Session & Keys (CRITICAL SECURITY)
 baileys_auth/
 *auth_info*
 *.session

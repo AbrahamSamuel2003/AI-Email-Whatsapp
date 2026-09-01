@@ -44,17 +44,33 @@ export interface AIReplyResult {
   closing: string;
 }
 
+export interface NewEmailComposeContext {
+  recipientEmail: string;
+  clientInstruction: string;
+  clientName: string;
+  senderEmail: string;
+}
+
+export interface NewEmailComposeResult {
+  subject: string;
+  body: string;
+}
+
 export type WhatsAppSessionState =
   | 'IDLE'
   | 'NOTIFIED'
   | 'PREVIEW_GENERATED'
-  | 'CONFIRMED_SENT';
+  | 'CONFIRMED_SENT'
+  | 'AWAITING_RECIPIENT'
+  | 'AWAITING_COMPOSE_MESSAGE'
+  | 'COMPOSE_MANUAL_EDIT';
 
 export interface WhatsAppInboundMessage {
   from: string; // E.164 phone number
   messageId: string;
   text: string;
   timestamp: number;
+  isVoiceNote?: boolean;
 }
 
 export interface OutboundReplyPayload {
@@ -65,3 +81,13 @@ export interface OutboundReplyPayload {
   inReplyToMessageId?: string;
   references?: string;
 }
+
+export interface OutboundNewEmailPayload {
+  toEmail: string;
+  subject: string;
+  body: string;
+  fromEmail?: string;
+}
+
+export type UserMode = 'STANDARD' | 'ADVANCED';
+

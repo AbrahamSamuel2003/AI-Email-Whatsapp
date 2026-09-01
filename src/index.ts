@@ -20,12 +20,12 @@ async function start() {
     console.log(`📱 WhatsApp Provider: ${config.WHATSAPP_PROVIDER}`);
     console.log(`======================================================\n`);
 
-    if (config.AUTO_SYNC_ENABLED && config.EMAIL_PROVIDER === 'gmail') {
+    if (config.AUTO_SYNC_ENABLED) {
       const { GmailPollerService } = await import('./services/email/gmail-poller.service.js');
-      GmailPollerService.start(config.AUTO_SYNC_INTERVAL_SECONDS);
+      GmailPollerService.start(config.AUTO_SYNC_INTERVAL_SECONDS || 10);
     }
   } catch (err) {
-    console.error('❌ Error starting server:', err);
+    console.error('Error starting server:', err);
     process.exit(1);
   }
 }

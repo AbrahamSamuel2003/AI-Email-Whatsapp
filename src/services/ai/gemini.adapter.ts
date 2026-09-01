@@ -27,7 +27,7 @@ export class GeminiAIAdapter implements IAIProvider {
       .trim();
   }
 
-  async classifyImportance(email: EmailMetadata): Promise<AIImportanceResult> {
+  async classifyImportance(email: EmailMetadata, preferredLanguage: string = 'ENGLISH'): Promise<AIImportanceResult> {
     try {
       const model = this.genAI.getGenerativeModel({
         model: this.modelName,
@@ -37,7 +37,7 @@ export class GeminiAIAdapter implements IAIProvider {
         },
       });
 
-      const prompt = buildImportanceClassificationPrompt(email);
+      const prompt = buildImportanceClassificationPrompt(email, preferredLanguage);
       const result = await model.generateContent(prompt);
       const rawText = result.response.text();
       const cleanJson = this.sanitizeJsonResponse(rawText);
@@ -60,6 +60,7 @@ export class GeminiAIAdapter implements IAIProvider {
         reasoning: parsed.reason || parsed.reasoning || 'Evaluated via Gemini AI model',
       };
     } catch (err: any) {
+      console.warn(`[Gemini AI Error] ${err.message}`);
       console.log('[AI Engine] Using resilient local fallback parser.');
       return this.fallbackAdapter.classifyImportance(email);
     }
@@ -81,14 +82,45 @@ export class GeminiAIAdapter implements IAIProvider {
       const cleanJson = this.sanitizeJsonResponse(rawText);
 
       const parsed = JSON.parse(cleanJson) as any;
+      const { removeEmojis } = await import('../../core/text-sanitizer.js');
       return {
-        subject: parsed.subject || `Re: ${context.subject}`,
-        replyBody: parsed.replyBody,
-        closing: parsed.closing || `Regards,\n${context.clientName}`,
+        subject: removeEmojis(parsed.subject || `Re: ${context.subject}`),
+        replyBody: removeEmojis(parsed.replyBody),
+        closing: removeEmojis(parsed.closing || `Regards,\n${context.clientName}`),
       };
     } catch (err: any) {
+      console.warn(`[Gemini AI Error] ${err.message}`);
       console.log('[AI Engine] Using resilient local reply generator.');
       return this.fallbackAdapter.generateReply(context);
+    }
+  }
+
+  async generateNewEmailDraft(context: import('../../core/types.js').NewEmailComposeContext): Promise<import('../../core/types.js').NewEmailComposeResult> {
+    try {
+      const model = this.genAI.getGenerativeModel({
+        model: this.modelName,
+        generationConfig: {
+          responseMimeType: 'application/json',
+          temperature: 0.2,
+        },
+      });
+
+      const { buildNewEmailComposePrompt } = await import('./prompts.js');
+      const prompt = buildNewEmailComposePrompt(context);
+      const result = await model.generateContent(prompt);
+      const rawText = result.response.text();
+      const cleanJson = this.sanitizeJsonResponse(rawText);
+
+      const parsed = JSON.parse(cleanJson) as any;
+      const { removeEmojis } = await import('../../core/text-sanitizer.js');
+      return {
+        subject: removeEmojis(parsed.subject || 'Business Discussion & Update'),
+        body: removeEmojis(parsed.body || `Dear Sir/Madam,\n\n${context.clientInstruction}\n\nBest regards,\n${context.clientName}`),
+      };
+    } catch (err: any) {
+      console.warn(`[Gemini AI Error] ${err.message}`);
+      console.log('[AI Engine] Using resilient local compose generator.');
+      return this.fallbackAdapter.generateNewEmailDraft(context);
     }
   }
 }

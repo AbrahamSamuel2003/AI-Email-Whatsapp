@@ -3,6 +3,8 @@ import { config } from '../../config/env.js';
 export type UserIntentType =
   | 'CHECK_MAIL'
   | 'SWITCH_MAILBOX'
+  | 'COMPOSE_NEW_EMAIL'
+  | 'MANUAL_EDIT'
   | 'CONTINUE'
   | 'SEND_REPLY'
   | 'CANCEL_DRAFT'
@@ -35,6 +37,33 @@ export class IntentClassifierService {
     sessionState: string
   ): Promise<UserIntentResult> {
     const norm = userInput.toLowerCase().trim();
+
+    // Fast-path: Instant 0ms cancel / reset / discard
+    if (/^(cancel|reset|clear|discard|stop|exit|close|abort|vendam|radd|cancel\s*it|cancel\s*draft|cancel\s*session)[\s!.]*$/i.test(norm)) {
+      return {
+        intent: 'CANCEL_DRAFT',
+        confidence: 1.0,
+        extractedMeaning: 'User cancelled active session/draft',
+      };
+    }
+
+    // Fast-path: Instant 0ms compose new email
+    if (/^(new\s*mail|new\s*email|compose|compose\s*mail|compose\s*email|send\s*new\s*mail|send\s*new\s*email|write\s*email|write\s*mail|puthu\s*mail|puthu\s*email|naya\s*mail|naya\s*email)[\s!.]*$/i.test(norm)) {
+      return {
+        intent: 'COMPOSE_NEW_EMAIL',
+        confidence: 1.0,
+        extractedMeaning: 'User wants to compose a new email',
+      };
+    }
+
+    // Fast-path: Instant 0ms manual edit mode
+    if (/^(edit|manual\s*edit|edit\s*draft|edit\s*mail|edit\s*email|modify|modify\s*draft|change\s*draft)[\s!.]*$/i.test(norm)) {
+      return {
+        intent: 'MANUAL_EDIT',
+        confidence: 1.0,
+        extractedMeaning: 'User wants to manually edit the draft',
+      };
+    }
 
     // Fast-path: Switch or list connected mailboxes
     if (/^(switch|accounts|switch\s*mail|switch\s*mailbox|change\s*mail|change\s*mailbox|mailboxes|inboxes|select\s*mail|account|mails)[\s!.]*$/i.test(norm)) {
@@ -166,52 +195,71 @@ Output MUST be a single raw JSON object:
   "extractedIndex": number (1 to 5, only if intent is SELECT_EMAIL or READ_FULL_EMAIL, otherwise null)
 }`;
 
-    try {
-      const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${apiKey}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          model: modelName,
-          messages: [
-            {
-              role: 'system',
-              content: 'You are an ultra-fast intent classifier. Output strictly raw JSON.',
-            },
-            {
-              role: 'user',
-              content: prompt,
-            },
-          ],
-          temperature: 0.1,
-        }),
-      });
+    const modelsToTry = Array.from(
+      new Set([
+        modelName,
+        'llama-3.3-70b-versatile',
+        'llama-3.1-8b-instant',
+        'mixtral-8x7b-32768',
+        'gemma2-9b-it',
+        'llama-3.2-3b-preview',
+      ])
+    );
 
-      if (!response.ok) {
-        return this.fallbackRegex(userInput, sessionState);
+    for (const model of modelsToTry) {
+      try {
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 2500);
+
+        const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${apiKey}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            model,
+            messages: [
+              {
+                role: 'system',
+                content: 'You are an ultra-fast intent classifier. Output strictly raw JSON.',
+              },
+              {
+                role: 'user',
+                content: prompt,
+              },
+            ],
+            temperature: 0.1,
+          }),
+          signal: controller.signal,
+        });
+
+        clearTimeout(timeoutId);
+
+        if (!response.ok) {
+          continue; // Try next model in cascade
+        }
+
+        const data = (await response.json()) as any;
+        const rawText = data?.choices?.[0]?.message?.content || '{}';
+        const clean = rawText.replace(/<think>[\s\S]*?<\/think>/gi, '').trim();
+        const match = clean.match(/\{[\s\S]*\}/);
+        if (match) {
+          const parsed = JSON.parse(match[0]);
+          return {
+            intent: parsed.intent || 'UNKNOWN',
+            confidence: parsed.confidence || 0.95,
+            extractedMeaning: parsed.extractedMeaning || userInput,
+            extractedLanguage: parsed.extractedLanguage,
+            extractedIndex: parsed.extractedIndex ? parseInt(parsed.extractedIndex) : undefined,
+          };
+        }
+      } catch (err) {
+        // Continue to next model or fallback
       }
-
-      const data = (await response.json()) as any;
-      const rawText = data?.choices?.[0]?.message?.content || '{}';
-      const clean = rawText.replace(/<think>[\s\S]*?<\/think>/gi, '').trim();
-      const match = clean.match(/\{[\s\S]*\}/);
-      if (match) {
-        const parsed = JSON.parse(match[0]);
-        return {
-          intent: parsed.intent || 'UNKNOWN',
-          confidence: parsed.confidence || 0.95,
-          extractedMeaning: parsed.extractedMeaning || userInput,
-          extractedLanguage: parsed.extractedLanguage,
-          extractedIndex: parsed.extractedIndex ? parseInt(parsed.extractedIndex) : undefined,
-        };
-      }
-
-      return this.fallbackRegex(userInput, sessionState);
-    } catch (err) {
-      return this.fallbackRegex(userInput, sessionState);
     }
+
+    return this.fallbackRegex(userInput, sessionState);
   }
 
   private static fallbackRegex(userInput: string, sessionState: string): UserIntentResult {

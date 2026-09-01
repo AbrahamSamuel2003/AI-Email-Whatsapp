@@ -7,6 +7,7 @@ import { TaskQueueManager } from '../queue/task-queue.js';
 import { prisma } from '../db/prisma.js';
 import { GmailAuthService } from '../services/email/gmail-auth.service.js';
 import { GmailSyncService } from '../services/email/gmail-sync.service.js';
+import { PhoneAlertService } from '../services/notification/phone-alert.service.js';
 import { getOnboardingHtml } from './onboarding-ui.js';
 
 export async function buildServer(): Promise<FastifyInstance> {
@@ -139,20 +140,68 @@ export async function buildServer(): Promise<FastifyInstance> {
     }
   });
 
-  // Updates User Profile (Full Name) from UI
+  // Authenticates or Registers User Identity (Full Name & WhatsApp Mobile Number Credentials)
   server.post('/api/user/profile', async (request, reply) => {
     const body = (request.body as any) || {};
     const name = body.name?.trim();
-    if (name) {
-      const user = await prisma.user.findFirst({ orderBy: { updatedAt: 'desc' } });
-      if (user) {
-        await prisma.user.update({
-          where: { id: user.id },
-          data: { name },
+    const phone = (body.whatsappNumber || body.phone || '').trim();
+
+    if (!name || !phone) {
+      return reply.code(400).send({
+        success: false,
+        error: 'Please enter both Full Name and Mobile Number.',
+      });
+    }
+
+    const cleanPhone = phone.replace(/\D/g, '');
+    const formattedPhone = cleanPhone ? (phone.startsWith('+') ? phone : `+${cleanPhone}`) : phone;
+
+    // Search for existing user with this mobile number
+    const existingUser = await prisma.user.findFirst({
+      where: {
+        OR: [
+          { whatsappNumber: formattedPhone },
+          { whatsappNumber: cleanPhone },
+          ...(cleanPhone.length >= 10 ? [{ whatsappNumber: { endsWith: cleanPhone.slice(-10) } }] : []),
+        ],
+      },
+      include: { emailAccounts: true },
+    });
+
+    if (existingUser) {
+      // If user exists, strictly verify that the Full Name matches the registered name
+      const isMatch = existingUser.name.trim().toLowerCase() === name.trim().toLowerCase();
+      if (!isMatch) {
+        return reply.code(403).send({
+          success: false,
+          error: 'Access Denied',
         });
       }
+
+      return reply.code(200).send({
+        success: true,
+        isNewUser: false,
+        name: existingUser.name,
+        phone: existingUser.whatsappNumber,
+      });
+    } else {
+      // First time registration: create new user database record with all capabilities
+      const newUser = await prisma.user.create({
+        data: {
+          name: name.trim(),
+          email: `${cleanPhone || Date.now()}@connect.ss40network.com`,
+          whatsappNumber: formattedPhone,
+          mode: 'STANDARD',
+        } as any,
+      });
+
+      return reply.code(200).send({
+        success: true,
+        isNewUser: true,
+        name: newUser.name,
+        phone: newUser.whatsappNumber,
+      });
     }
-    return reply.code(200).send({ status: 'ok', name });
   });
 
   // Handles Google OAuth callback
@@ -166,15 +215,33 @@ export async function buildServer(): Promise<FastifyInstance> {
     }
 
     try {
-      const result = await GmailAuthService.handleOAuthCallback(code, state);
-      // Redirect back to Onboarding Portal Step 3 with WhatsApp number
-      return reply.redirect(`/?step=3&whatsapp=${encodeURIComponent(result.user.whatsappNumber)}`);
+      await GmailAuthService.handleOAuthCallback(code, state);
+      // Redirect back to Onboarding Portal Step 3 cleanly without exposing numbers in URL
+      return reply.redirect('/?step=3');
     } catch (err: any) {
       server.log.error(`OAuth callback error: ${err.message}`);
-      return reply.code(500).send({
-        error: 'OAuth token exchange failed',
-        message: err.message,
-      });
+      return reply.type('text/html').send(`
+        <!DOCTYPE html>
+        <html>
+        <head>
+          <title>Google Sign-In Expired</title>
+          <style>
+            body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; background: #0F172A; color: #F8FAFC; display: flex; align-items: center; justify-content: center; min-height: 100vh; margin: 0; }
+            .card { background: #1E293B; border: 1px solid #334155; border-radius: 12px; padding: 2rem; max-width: 440px; text-align: center; box-shadow: 0 10px 25px rgba(0,0,0,0.4); }
+            h3 { color: #38BDF8; margin-top: 0; }
+            p { color: #94A3B8; font-size: 0.9rem; line-height: 1.5; }
+            .btn { display: inline-block; background: #0F766E; color: #FFFFFF; text-decoration: none; padding: 0.6rem 1.2rem; border-radius: 8px; font-weight: 600; margin-top: 1rem; }
+          </style>
+        </head>
+        <body>
+          <div class="card">
+            <h3>Authorization Code Expired</h3>
+            <p>This Google sign-in authorization code was already processed or expired. Please click below to authorize your mailbox fresh.</p>
+            <a href="/?step=2" class="btn">Return to Step 2 & Sign In with Google</a>
+          </div>
+        </body>
+        </html>
+      `);
     }
   });
 
@@ -365,7 +432,7 @@ export async function buildServer(): Promise<FastifyInstance> {
         <!DOCTYPE html>
         <html>
         <head><title>WhatsApp Connected</title><style>body{font-family:sans-serif;background:#0f172a;color:#fff;display:flex;align-items:center;justify-content:center;height:100vh;} .card{background:#1e293b;padding:2rem;border-radius:12px;text-align:center;}</style></head>
-        <body><div class="card"><h2>✅ WhatsApp Connected</h2><p>Session for <strong>${phone}</strong> is active and connected!</p></div></body></html>
+        <body><div class="card"><h2>WhatsApp Connected</h2><p>Session for <strong>${phone}</strong> is active and connected!</p></div></body></html>
       `);
     }
 
@@ -440,6 +507,7 @@ export async function buildServer(): Promise<FastifyInstance> {
   server.post('/api/whatsapp/pairing-code', async (request, reply) => {
     const body = (request.body as any) || {};
     const phone = body.phone || config.CLIENT_WHATSAPP_NUMBER;
+    const forceReset = Boolean(body.forceReset);
     const provider = WhatsAppFactory.getProvider() as any;
 
     if (typeof provider.requestPairingCodeForNumber !== 'function') {
@@ -447,11 +515,23 @@ export async function buildServer(): Promise<FastifyInstance> {
     }
 
     try {
-      const code = await provider.requestPairingCodeForNumber(phone);
+      const code = await provider.requestPairingCodeForNumber(phone, forceReset);
       return reply.code(200).send({ status: 'ok', phone, code });
     } catch (err: any) {
       return reply.code(200).send({ status: 'error', message: err.message, code: null });
     }
+  });
+
+  // API to reset WhatsApp session and generate fresh QR / Pairing Code
+  server.post('/api/whatsapp/reset-session', async (_request, reply) => {
+    const provider = WhatsAppFactory.getProvider() as any;
+    if (typeof provider.resetSession === 'function') {
+      await provider.resetSession(true);
+    }
+    try {
+      await prisma.whatsappSession.deleteMany({});
+    } catch (e) {}
+    return reply.code(200).send({ status: 'ok', message: 'WhatsApp session reset. Generating fresh QR/Pairing...' });
   });
 
   // API to check user connection status (Gmail & WhatsApp)
@@ -464,6 +544,24 @@ export async function buildServer(): Promise<FastifyInstance> {
       ? provider.getConnectedPhoneNumber()
       : null;
 
+    const query = (request.query as any) || {};
+    const queryPhone = (query.whatsapp || query.phone || '').trim();
+
+    let user = null;
+    if (queryPhone) {
+      const cleanQ = queryPhone.replace(/\D/g, '');
+      user = await prisma.user.findFirst({
+        where: {
+          OR: [
+            { whatsappNumber: queryPhone },
+            ...(cleanQ ? [{ whatsappNumber: `+${cleanQ}` }, { whatsappNumber: cleanQ }] : []),
+            ...(cleanQ.length >= 10 ? [{ whatsappNumber: { endsWith: cleanQ.slice(-10) } }] : []),
+          ],
+        },
+        include: { emailAccounts: { orderBy: { createdAt: 'asc' } } },
+      });
+    }
+
     // Find the active connected Email account (Gmail or IMAP_SMTP)
     const emailAccount = await prisma.emailAccount.findFirst({
       where: {
@@ -472,32 +570,89 @@ export async function buildServer(): Promise<FastifyInstance> {
           { provider: 'GMAIL', encryptedRefreshToken: { not: null } },
           { provider: 'IMAP_SMTP', encryptedPassword: { not: null } },
         ],
+        ...(user ? { userId: user.id } : {}),
       },
-      include: { user: true },
+      include: { user: { include: { emailAccounts: { orderBy: { createdAt: 'asc' } } } } },
       orderBy: { updatedAt: 'desc' },
     });
 
-    const user = emailAccount?.user || (await prisma.user.findFirst({
-      orderBy: { updatedAt: 'desc' },
-      include: { emailAccounts: { orderBy: { createdAt: 'asc' } } },
-    }));
+    if (!user) {
+      user = emailAccount?.user || (await prisma.user.findFirst({
+        orderBy: { updatedAt: 'desc' },
+        include: { emailAccounts: { orderBy: { createdAt: 'asc' } } },
+      }));
+    }
 
-    const allAccounts = user?.emailAccounts || (emailAccount ? [emailAccount] : []);
+    const allAccounts = (user as any)?.emailAccounts || (emailAccount ? [emailAccount] : []);
 
     return reply.code(200).send({
       whatsappNumber: connectedPhone || user?.whatsappNumber || config.CLIENT_WHATSAPP_NUMBER,
       userName: user?.name || 'Executive Client',
+      mode: (user as any)?.mode || 'ADVANCED',
       emailConnected: Boolean(emailAccount || allAccounts.length > 0),
       emailAddress: emailAccount?.emailAddress || allAccounts[0]?.emailAddress || null,
       provider: emailAccount?.provider || allAccounts[0]?.provider || 'GMAIL',
-      emailAccounts: allAccounts.map((a) => ({
+      emailAccounts: allAccounts.map((a: any) => ({
         id: a.id,
         email: a.emailAddress,
         provider: a.provider,
       })),
       whatsappConnected,
+      ntfyTopic: PhoneAlertService.getTopicForUser(user || connectedPhone || config.CLIENT_WHATSAPP_NUMBER),
       timestamp: new Date().toISOString(),
     });
+  });
+
+  // API to send a test push notification to user's NTFY mobile app
+  server.post('/api/user/test-ntfy', async (request, reply) => {
+    const body = (request.body as any) || {};
+    const topic = body.topic?.trim() || PhoneAlertService.getTopicForUser(body.whatsapp || config.CLIENT_WHATSAPP_NUMBER);
+    const title = body.title || 'SS40 Push Alert Connected';
+    const message = body.message || 'Push alerts connected. Real-time email and AI notifications are active.';
+
+    const sent = await PhoneAlertService.sendAlert(
+      {
+        title,
+        message,
+        priority: 'high',
+        clickUrl: 'whatsapp://',
+      },
+      topic
+    );
+
+    return reply.code(200).send({
+      success: sent,
+      topic,
+      message: sent ? 'Test push notification sent successfully.' : 'Failed to send notification to ntfy server.',
+    });
+  });
+
+  // API to update user Assistant Mode (STANDARD vs ADVANCED)
+  server.post('/api/user/mode', async (request, reply) => {
+    const body = (request.body as any) || {};
+    const mode = (body.mode || '').toUpperCase();
+    if (mode !== 'STANDARD' && mode !== 'ADVANCED') {
+      return reply.code(400).send({ error: 'Invalid mode. Allowed values: STANDARD, ADVANCED' });
+    }
+
+    const updated = await (prisma.user as any).updateMany({
+      data: { mode },
+    });
+
+    if (updated.count === 0) {
+      const defaultPhone = config.CLIENT_WHATSAPP_NUMBER || '+1234567890';
+      const clean = defaultPhone.replace(/\D/g, '');
+      await prisma.user.create({
+        data: {
+          whatsappNumber: defaultPhone,
+          email: `${clean || Date.now()}@connect.ss40network.com`,
+          name: 'Client',
+          mode: mode,
+        } as any,
+      });
+    }
+
+    return reply.code(200).send({ success: true, mode });
   });
 
   // API to dispatch welcome greeting to WhatsApp

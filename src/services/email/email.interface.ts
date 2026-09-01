@@ -1,4 +1,4 @@
-import { EmailMetadata, OutboundReplyPayload } from '../../core/types.js';
+import { EmailMetadata, OutboundNewEmailPayload, OutboundReplyPayload } from '../../core/types.js';
 
 export interface SendResult {
   externalMessageId: string;
@@ -10,5 +10,6 @@ export interface SendResult {
 export interface IEmailProvider {
   fetchMessage(messageId: string): Promise<EmailMetadata>;
   sendReply(payload: OutboundReplyPayload): Promise<SendResult>;
+  sendNewEmail(payload: OutboundNewEmailPayload): Promise<SendResult>;
   getThreadMessages(threadId: string): Promise<EmailMetadata[]>;
 }
